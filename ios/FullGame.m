@@ -87,6 +87,33 @@ static void SelectInitialClass(void *handle, void (*queue)(const char *)) {
     });
 }
 
+// Launch arguments such as "-BO2ConnectDelay 80" override the default waits.
+static NSTimeInterval Delay(NSString *key, NSTimeInterval fallback) {
+    double value=[NSUserDefaults.standardUserDefaults doubleForKey:key];
+    return value>=5 && value<=600 ? value : fallback;
+}
+
+static uint32_t ClientState(void *handle, BOOL mp) {
+    uint8_t **arena=dlsym(handle,"bo2_g_base");
+    const uint8_t *base=arena ? *arena : NULL;
+    if (!base) return UINT32_MAX;
+    uint32_t value; memcpy(&value,base+(mp?0x10e9d88:0x10e7e18),sizeof(value));
+    return value;
+}
+
+// The frontend can still be loading when the first connect is queued. Repeat
+// it only while the client connection state has not moved at all.
+static void QueueConnect(void *handle, void (*queue)(const char *), NSString *command, BOOL mp, unsigned retries) {
+    uint32_t before=ClientState(handle,mp);
+    queue(command.UTF8String);
+    if (!retries || before==UINT32_MAX) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,15*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        if (ClientState(handle,mp)!=before) return;
+        NSLog(@"Private connect left the client state at %u, retrying",before);
+        QueueConnect(handle,queue,command,mp,retries-1);
+    });
+}
+
 static void ConfigureRuntime(NSString *mode) {
     // Keep the upstream play_steam.sh execution settings. The desktop launcher
     // also enables named input pipes; UIKit sends events directly to the queue.
@@ -345,13 +372,15 @@ static NSURL *GameDirectory(NSError **error) {
             _status.text=@"Could not start the private server connection."; return;
         }
         BOOL mp=[mode isEqualToString:@"mps"];
-        if (mp) dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+        NSTimeInterval connectDelay=Delay(@"BO2ConnectDelay",65);
+        NSTimeInterval keyDelay=MIN(Delay(@"BO2MenuKeyDelay",30),connectDelay-5);
+        if (mp) dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(keyDelay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
             post(0x100,13,1);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,120*NSEC_PER_MSEC),dispatch_get_main_queue(),^{post(0x101,13,0xc0000001);});
         });
         NSString *command=[NSString stringWithFormat:@"connect %@:%u",_server,(unsigned)_port];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,65*NSEC_PER_SEC),dispatch_get_main_queue(),^{
-            queue(command.UTF8String);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(connectDelay*NSEC_PER_SEC)),dispatch_get_main_queue(),^{
+            QueueConnect(handle,queue,command,mp,2);
             if (mp) SelectInitialClass(handle,queue);
         });
     }
@@ -370,7 +399,7 @@ static NSURL *GameDirectory(NSError **error) {
             [notice.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
             [notice.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8]
         ]];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,65*NSEC_PER_SEC),dispatch_get_main_queue(),^{ [notice removeFromSuperview]; });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(Delay(@"BO2ConnectDelay",65)*NSEC_PER_SEC)),dispatch_get_main_queue(),^{ [notice removeFromSuperview]; });
     }
     _menu.hidden = YES;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{

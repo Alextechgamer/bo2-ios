@@ -93,29 +93,34 @@ def pump(game, udp):
                 game.sendall(struct.pack("!H", len(reply)) + reply)
 
 
-def serve_request(mux, control, device, gateway):
-    with socket.socket(type=socket.SOCK_DGRAM) as udp:
+SESSION_GRACE = 120  # seconds a verified session waits for the game stream to return
+
+
+def verify(control, gateway):
+    """Answer one Join query and return the gateway socket it was verified on."""
+    udp = socket.socket(type=socket.SOCK_DGRAM)
+    try:
         with control:
             port, nonce = request(control)
             udp.connect((str(gateway), port))
-            reply = confirm(udp, nonce)
-            control.sendall(reply)
-        print("Verified gateway, awaiting game", port, flush=True)
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline:
-            game = open_listener(mux, device, 19470)
-            if game is not None:
-                with game:
-                    print("USB game connected", port, flush=True)
-                    pump(game, udp)
-                print("USB game disconnected", port, flush=True)
-                return
-            time.sleep(.15)
-        raise TimeoutError("Game listener did not open within 20 seconds")
+            control.sendall(confirm(udp, nonce))
+    except BaseException:
+        udp.close()
+        raise
+    return udp, port
 
 
 def serve(mux, gateway):
     prior = None
+    session = None  # [gateway socket, game port, deadline]
+
+    def end_session(reason):
+        nonlocal session
+        if session:
+            session[0].close()
+            print("USB session ended:", reason, flush=True)
+        session = None
+
     print("USB Join fallback polling for a single wired target", flush=True)
     while True:
         try:
@@ -123,14 +128,35 @@ def serve(mux, gateway):
             if (device is not None) != prior:
                 prior = device is not None
                 print("Wired target available" if prior else "Waiting for a single wired target", flush=True)
-            if device is not None:
-                control = open_listener(mux, device, 19469)
-                if control is not None:
-                    serve_request(mux, control, device, gateway)
-        except (OSError, ValueError, KeyError, struct.error, plistlib.InvalidFileException) as error:
+            control = open_listener(mux, device, 19469) if device is not None else None
+            if control is not None:
+                # A fresh Join query always replaces the previous session.
+                end_session("new Join request")
+                udp, port = verify(control, gateway)
+                session = [udp, port, time.monotonic() + SESSION_GRACE]
+                print("Verified gateway, awaiting game", port, flush=True)
+            elif session and device is not None:
+                # The same gateway socket is reused after a cable or stream drop,
+                # so the server keeps seeing one client address.
+                game = open_listener(mux, device, 19470)
+                if game is not None:
+                    with game:
+                        print("USB game connected", session[1], flush=True)
+                        try:
+                            pump(game, session[0])
+                        finally:
+                            session[2] = time.monotonic() + SESSION_GRACE
+                    print("USB game stream closed, waiting to reconnect", session[1], flush=True)
+        except (ValueError, KeyError, struct.error, plistlib.InvalidFileException) as error:
+            print("USB fallback:", error, flush=True)
+            end_session("invalid data")
+            time.sleep(.5)
+        except OSError as error:
             print("USB fallback:", error, flush=True)
             time.sleep(.5)
-        time.sleep(.2 if prior else 1)
+        if session and time.monotonic() > session[2]:
+            end_session("game did not reconnect")
+        time.sleep(.15 if session else .2 if prior else 1)
 
 
 if __name__ == "__main__":

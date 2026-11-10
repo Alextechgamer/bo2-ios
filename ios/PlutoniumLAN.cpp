@@ -45,10 +45,12 @@ Packet incoming, outgoing;
 Packet serverMap, nextPacket;
 size_t written=0;
 
+// Drop only the byte stream. The handshake phase and any pending map packet
+// belong to the game connection, which survives a USB reconnect.
 void closeChannel() {
     if(channel>=0) close(channel);
-    channel=-1;phase=Phase::Idle;
-    incoming.clear();outgoing.clear();serverMap.clear();nextPacket.clear();written=0;
+    channel=-1;
+    incoming.clear();outgoing.clear();written=0;
 }
 bool nonblocking(int fd) {
     return fd>=0 && fcntl(fd,F_SETFL,fcntl(fd,F_GETFL,0)|O_NONBLOCK)==0;
@@ -56,10 +58,12 @@ bool nonblocking(int fd) {
 bool ready() {
     if(channel>=0) return true;
     if(listener<0) return false;
-    channel=accept(listener,nullptr,nullptr);
-    if(!nonblocking(channel)){closeChannel();return false;}
+    int fd=accept(listener,nullptr,nullptr);
+    if(fd<0) return false;
+    if(!nonblocking(fd)){close(fd);return false;}
     int yes=1;
-    setsockopt(channel,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof yes);
+    setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof yes);
+    channel=fd;
     return true;
 }
 bool flush() {
@@ -246,7 +250,11 @@ extern "C" void *bo2_pluto_send(State *s,uint32_t pc,void *mem){
     bool ok;
     if(tag=="getchallenge"){
         for(size_t j=0;j<gamePeer.size();j++)gamePeer[j]=win32_mem_read8(addr+j);
-        if(phase==Phase::Idle || phase==Phase::Playing) phase=Phase::Settings;
+        if(phase==Phase::Idle || phase==Phase::Playing){
+            // A new connection attempt must not inherit the last one's map packet.
+            serverMap.clear();nextPacket.clear();
+            phase=Phase::Settings;
+        }
         ok=retry();
     }else {
 #if BO2_PLUTONIUM_ZOMBIES

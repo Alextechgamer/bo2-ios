@@ -60,6 +60,8 @@ python3 lan/usb_join_fallback.py "$GATEWAY_IP"
 
 In **Join Private Server**, use the configured address and the selected mode's standard port. The phone first sends a direct UDP query. If it times out, the phone opens a loopback control port and the helper uses the Mac's system usbmuxd service to forward the compatibility query. After a compatible reply, it forwards game packets over the cable. The launcher displays the selected transport while the match loads.
 
+If the cable or stream drops during a match, the helper keeps the verified session for two minutes and reconnects the game stream on the same gateway socket. The launcher sends the join command 65 seconds after the mode starts and repeats it up to twice if the client state has not changed; pass `-BO2ConnectDelay <seconds>` or `-BO2MenuKeyDelay <seconds>` as launch arguments to adjust the waits. The reconnect and retry paths have not yet been exercised on a device.
+
 On the tested iPhone, the direct Wi-Fi query timed out. The USB path returned the compatibility reply, established the game connection and loaded the map. The private server recorded the client joining.
 
 ## Verify an instrumented two-player run
