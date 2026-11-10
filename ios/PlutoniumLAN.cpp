@@ -23,8 +23,10 @@ extern "C" void *pluto_original_gamestate_long(State*, uint32_t, void*);
 extern "C" void *pluto_original_client_memory(State*, uint32_t, void*);
 extern "C" void *pluto_original_server_id(State*, uint32_t, void*);
 extern "C" void *pluto_original_packet_event(State*, uint32_t, void*);
-#if !BO2_PLUTONIUM_ZOMBIES
 extern "C" void *pluto_original_lua_init(State*, uint32_t, void*);
+#if BO2_PLUTONIUM_ZOMBIES
+extern "C" void *sub_9664a0(State*, uint32_t, void*);
+#else
 extern "C" void *pluto_original_lua_read(State*, uint32_t, void*);
 extern "C" void *sub_969120(State*, uint32_t, void*);
 extern "C" uint32_t win32_shim_alloc(uint32_t, uint32_t);
@@ -142,6 +144,25 @@ bool retry() {
 void returns(State& s,uint32_t result) {s.gpr.rax.dword=result;win32_cdecl_ret(s);}
 
 constexpr uint32_t configOffsets=BO2_PLUTONIUM_ZOMBIES?0x1131b0c:0x1133a7c;
+constexpr uint32_t slotFlags=BO2_PLUTONIUM_ZOMBIES?0x10e7e10:0x10e9d80;
+// A direct console join skips the lobby that marks local player slot zero
+// active. Call the retail slot setter on a scratch frame below the stack.
+bool activateLocalSlot(State *s,void *mem) {
+    if(win32_mem_read8(slotFlags)&1) return false;
+    State saved=*s;
+    uint32_t sp=(s->gpr.rsp.dword&~15u)-12;
+    win32_mem_write32(sp,0xdead0003);
+    win32_mem_write32(sp+4,0);
+    win32_mem_write32(sp+8,1);
+    s->gpr.rsp.dword=sp;
+#if BO2_PLUTONIUM_ZOMBIES
+    sub_9664a0(s,0x9664a0,mem);
+#else
+    sub_969120(s,0x969120,mem);
+#endif
+    *s=saved;
+    return win32_mem_read8(slotFlags)&1;
+}
 // Read argv[1] from the console connect handler's current command frame.
 bool privateConnectCommand(const State& s) {
     uint32_t tls=win32_mem_read32(s.addr.fs_base.dword+0x2c);
@@ -380,18 +401,9 @@ extern "C" void *bo2_pluto_packet_event(State *s,uint32_t pc,void *mem){
 #if !BO2_PLUTONIUM_ZOMBIES
         // A direct console join can enter CA_ACTIVE without the lobby having
         // activated slot zero. GetLocalPlayers then omits its valid entity.
-        if(win32_mem_read32(0x10e9d88)==10 && !(win32_mem_read8(0x10e9d80)&1)){
-            State saved=*s;
-            uint32_t sp=(s->gpr.rsp.dword&~15u)-12;
-            win32_mem_write32(sp,0xdead0003);
-            win32_mem_write32(sp+4,0);
-            win32_mem_write32(sp+8,1);
-            s->gpr.rsp.dword=sp;
-            sub_969120(s,0x969120,mem);
-            *s=saved;
-            fprintf(stderr,"[Plutonium LAN] activated MP local player slot %u\n",
-                    win32_mem_read8(0x10e9d80)&1);
-        }
+        // Normally done before the in-game UI starts; this is the late fallback.
+        if(win32_mem_read32(0x10e9d88)==10 && activateLocalSlot(s,mem))
+            fprintf(stderr,"[Plutonium LAN] activated MP local player slot late\n");
 #endif
     }
     return result;
@@ -434,16 +446,24 @@ extern "C" void *bo2_pluto_audio_fill(State *s,uint32_t pc,void *mem){
     return pluto_original_audio_fill(s,pc,mem);
 }
 
-#if !BO2_PLUTONIUM_ZOMBIES
 extern "C" void *bo2_pluto_lua_init(State *s,uint32_t pc,void *mem){
-    uint32_t sp=s->gpr.rsp.dword;
-    if(configured && phase==Phase::Playing && win32_mem_read32(sp)==0x55c04f &&
-       win32_arg(*s,0)==1){
-        uint32_t state=win32_mem_read32(0x10e9d88);
-        if(state>=6 && state<=9) win32_mem_write32(sp+4,0);
+    if(configured && phase==Phase::Playing){
+        // A private join reaches this call asking for the frontend UI. Select
+        // the in-game initializer while the client is connecting or loading.
+        uint32_t sp=s->gpr.rsp.dword;
+        if(win32_mem_read32(sp)==(BO2_PLUTONIUM_ZOMBIES?0x55d38f:0x55c04f) && win32_arg(*s,0)==1){
+            uint32_t state=win32_mem_read32(BO2_PLUTONIUM_ZOMBIES?0x10e7e18:0x10e9d88);
+            if(state>=6 && state<=9) win32_mem_write32(sp+4,0);
+        }
+        // The in-game initializer creates the player's UI root and adds the
+        // HUD menu only while local player slot zero is active.
+        if(!(win32_arg(*s,0)&255) && activateLocalSlot(s,mem))
+            fprintf(stderr,"[Plutonium LAN] activated local player slot before in-game UI init\n");
     }
     return pluto_original_lua_init(s,pc,mem);
 }
+
+#if !BO2_PLUTONIUM_ZOMBIES
 
 extern "C" void *bo2_pluto_lua_read(State *s,uint32_t pc,void *mem){
     struct Script { const char *name; uint32_t offset,size,compiledSize,rawfile; };

@@ -64,6 +64,10 @@ If the cable or stream drops during a match, the helper keeps the verified sessi
 
 On the tested iPhone, the direct Wi-Fi query timed out. The USB path returned the compatibility reply, established the game connection and loaded the map. The private server recorded the client joining.
 
+## Touch controls
+
+With **Pad: On**, the left half of the screen is a move stick that appears under the thumb and sprints at full forward tilt. Swipe the right half to look; a swipe that starts on Fire, Aim or another right-hand pad keeps steering. The right-hand pads are Fire, Aim, Jump, Crouch, Use/Reload, Swap, Melee, Lethal and Tactical. Pause, Scoreboard and a D-pad sit at the top left. Set **Pad: Off** to tap menus directly. Pass `-BO2LookSensitivity <0.2–5>` as a launch argument to scale swipe speed. This layout has not yet been tried on a device.
+
 ## Verify an instrumented two-player run
 
 The offline verifiers read an existing `match.log`, `ios.jsonl.gz` and `windows.jsonl` in a private run directory. They require the staged event and snapshot records produced by the game test instrumentation. Ordinary server logs alone do not contain those records.
