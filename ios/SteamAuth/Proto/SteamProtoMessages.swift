@@ -586,7 +586,7 @@ struct CMsgClientLogon {
 
     /// Get the machine's primary IPv4 address in host byte order (for obfuscation).
     /// getifaddrs works on both macOS and iOS — Host.current() doesn't exist on iOS.
-    private static func getLocalIPv4() -> UInt32 {
+    fileprivate static func getLocalIPv4() -> UInt32 {
         var addrList: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&addrList) == 0, let first = addrList else { return 0 }
         defer { freeifaddrs(addrList) }
@@ -625,6 +625,20 @@ struct CMsgClientLogon {
         encoder.writeString(fieldNumber: 96, value: machineName)                // machine_name = 96
         encoder.writeBool(fieldNumber: 102, value: supportsRateLimitResponse)   // supports_rate_limit_response = 102
         encoder.writeString(fieldNumber: 108, value: accessToken)               // access_token = 108
+        return encoder.data
+    }
+}
+
+struct CMsgAnonymousGameServerLogon {
+    let appID: UInt32
+    func serialize() -> Data {
+        var encoder = ProtobufEncoder()
+        encoder.writeUInt32(fieldNumber: 1, value: 65581)
+        encoder.writeUInt32(fieldNumber: 7, value: UInt32(bitPattern: -102))
+        var ip = ProtobufEncoder()
+        ip.writeFixed32(fieldNumber: 1, value: CMsgClientLogon.getLocalIPv4() ^ 0xBAADF00D)
+        encoder.writeSubmessage(fieldNumber: 11, value: ip.data)
+        encoder.writeUInt32(fieldNumber: 94, value: appID)
         return encoder.data
     }
 }

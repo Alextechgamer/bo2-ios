@@ -425,6 +425,7 @@ static NSURL *GameDirectory(NSError **error) {
     _menu.hidden = YES;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         int result = entry(sections.fileSystemRepresentation);
+        if (self->_steamLaunch) NSLog(@"[steam-runtime] guest returned result=%d",result);
         dispatch_async(dispatch_get_main_queue(), ^{
             [self finishSteamLaunch];
             [surface removeFromSuperview];

@@ -19,7 +19,7 @@ extern "C" bool bo2_ios_set_steam_provider(const BO2SteamProviderV1 *provider) {
         provider->structSize < sizeof(BO2SteamProviderV1) || !provider->context ||
         !provider->steamID || !provider->isLoggedOn || !provider->ownsApp ||
         !provider->dlcInstalled || !provider->requestEncryptedTicket ||
-        !provider->pollEncryptedTicket || !provider->releaseTicket) return false;
+        !provider->pollEncryptedTicket || !provider->releaseTicket || !provider->vacStatus) return false;
     auto copy = std::make_shared<const BO2SteamProviderV1>(*provider);
     std::atomic_store_explicit(&active, std::move(copy), std::memory_order_release);
     return true;

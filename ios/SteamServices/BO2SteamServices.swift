@@ -31,6 +31,7 @@ final class BO2SteamServices: ObservableObject {
 
     @Published private(set) var state: BO2SteamServiceState = .signedOut
     @Published private(set) var authenticatedSteamID: UInt64 = 0
+    @Published private(set) var vacBannedApps: [UInt32]?
     let session: any SteamCMSession
     let authentication: SteamGameAuthentication
     private let credentialsAvailable: @MainActor () -> Bool
@@ -62,7 +63,9 @@ final class BO2SteamServices: ObservableObject {
             }
         }
         authenticatedSteamID = session.steamID
+        vacBannedApps = session.vacBannedApps
         session.identityDidChange = { [weak self] steamID in self?.authenticatedSteamID = steamID }
+        session.vacStatusDidChange = { [weak self] apps in self?.vacBannedApps = apps }
     }
 
     deinit {
@@ -75,6 +78,7 @@ final class BO2SteamServices: ObservableObject {
         observedCredentialRevision = credentialRevision()
         authentication.accountChanged()
         authenticatedSteamID = 0
+        vacBannedApps = nil
         generation &+= 1
         refreshTask?.cancel()
         refreshTask = nil

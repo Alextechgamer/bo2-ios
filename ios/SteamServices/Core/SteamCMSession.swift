@@ -15,6 +15,9 @@ protocol SteamCMSession: AnyObject {
     /// The logged-on account, 0 when not logged on.
     var steamID: UInt64 { get }
     var identityDidChange: (@MainActor (UInt64) -> Void)? { get set }
+    var vacBannedApps: [UInt32]? { get }
+    var vacStatusDidChange: (@MainActor ([UInt32]?) -> Void)? { get set }
+    func awaitVACBannedApps(timeout: TimeInterval) async throws -> [UInt32]
     /// Holds the shared connection while a game owns it; tokens are generation-safe.
     func acquireRuntimeLease() throws -> UUID
     func releaseRuntimeLease(_ lease: UUID)
@@ -33,4 +36,16 @@ protocol SteamCMSession: AnyObject {
     func sendAndWaitPICS(eMsg: EMsg, body: Data, timeout: TimeInterval) async throws -> [SteamMessageCodec.IncomingMessage]
     /// Calls a unified-service method and returns the response body.
     func callServiceMethod(method: SteamServiceMethod, body: Data, timeout: TimeInterval) async throws -> Data
+}
+
+extension SteamCMSession {
+    // Adapters without a genuine security-status source remain unknown.
+    var vacBannedApps: [UInt32]? { nil }
+    var vacStatusDidChange: (@MainActor ([UInt32]?) -> Void)? {
+        get { nil }
+        set { }
+    }
+    func awaitVACBannedApps(timeout: TimeInterval) async throws -> [UInt32] {
+        throw SteamError.invalidMessage
+    }
 }

@@ -111,6 +111,14 @@ final class BO2SteamRuntime: NSObject {
         guard owned.contains(appID) else {
             throw SteamFileError.invalid("This Steam account does not own the selected game.")
         }
+        let bans = try await services.session.awaitVACBannedApps(timeout: 15)
+        try Task.checkCancellation()
+        guard SteamSignIn.revision == revision, services.session.steamID == snapshot.steamID else {
+            throw SteamError.disconnected
+        }
+        guard !bans.contains(appID) else {
+            throw SteamFileError.invalid("Steam reports a VAC ban for this game.")
+        }
         let lease = try services.session.acquireRuntimeLease()
         do {
             let storage = BO2PlayerStorage(root: storageRoot)
@@ -172,6 +180,8 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
     private var tickets: [UInt64: Ticket] = [:]
     private var tasks: [UInt64: Task<Void, Never>] = [:]
     private var identitySubscription: AnyCancellable?
+    private var securitySubscription: AnyCancellable?
+    private var bannedApps: Set<UInt32>?
 
     @MainActor
     init(services: BO2SteamServices, steamID: UInt64, appID: UInt32,
@@ -180,15 +190,26 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
               services.authenticatedSteamID == steamID, ownedApps.contains(appID) else {
             throw SteamFileError.invalid("A verified Steam account and game license are required.")
         }
+        guard let banned = services.vacBannedApps, !banned.contains(appID) else {
+            throw SteamFileError.invalid("Steam account security status is unavailable or this game has a VAC ban.")
+        }
         self.services = services
         self.account = steamID
         self.appID = appID
         self.revision = SteamSignIn.revision
         self.owned = ownedApps
         self.installed = installedDLC.intersection(ownedApps)
+        self.bannedApps = Set(banned)
         identitySubscription = services.$authenticatedSteamID.sink { [weak self] current in
             guard let self, current != account else { return }
             close()
+        }
+        securitySubscription = services.$vacBannedApps.sink { [weak self] apps in
+            guard let self else { return }
+            lock.lock()
+            bannedApps = apps.map { Set($0) }
+            lock.unlock()
+            if apps == nil || apps!.contains(appID) { close() }
         }
     }
 
@@ -199,6 +220,12 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
     }
     func ownsApp(_ app: UInt32) -> Bool { steamID() != 0 && owned.contains(app) }
     func dlcInstalled(_ app: UInt32) -> Bool { steamID() != 0 && installed.contains(app) }
+    func vacStatus(_ app: UInt32) -> Int32 {
+        lock.lock(); defer { lock.unlock() }
+        guard SteamSignIn.revision == revision else { return -1 }
+        if bannedApps?.contains(app) == true { return 1 }
+        return valid && bannedApps != nil ? 0 : -1
+    }
 
     func requestTicket(_ data: Data) -> UInt64 {
         lock.lock()
@@ -298,6 +325,7 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
         provider.requestEncryptedTicket = bo2_launcher_request_ticket
         provider.pollEncryptedTicket = bo2_launcher_poll_ticket
         provider.releaseTicket = bo2_launcher_release_ticket
+        provider.vacStatus = bo2_launcher_vac_status
         return provider
     }
 }
@@ -314,6 +342,8 @@ func bo2_launcher_steam_logged_on(_ context: UnsafeMutableRawPointer?) -> Bool {
 func bo2_launcher_steam_owns(_ context: UnsafeMutableRawPointer?, _ appID: UInt32) -> Bool { steamRuntime(context)?.ownsApp(appID) ?? false }
 @_cdecl("bo2_launcher_steam_dlc")
 func bo2_launcher_steam_dlc(_ context: UnsafeMutableRawPointer?, _ appID: UInt32) -> Bool { steamRuntime(context)?.dlcInstalled(appID) ?? false }
+@_cdecl("bo2_launcher_vac_status")
+func bo2_launcher_vac_status(_ context: UnsafeMutableRawPointer?, _ appID: UInt32) -> Int32 { steamRuntime(context)?.vacStatus(appID) ?? -1 }
 @_cdecl("bo2_launcher_request_ticket")
 func bo2_launcher_request_ticket(_ context: UnsafeMutableRawPointer?, _ data: UnsafeRawPointer?, _ size: UInt32) -> UInt64 {
     guard let runtime = steamRuntime(context), size <= 64 * 1024, size == 0 || data != nil else { return 0 }

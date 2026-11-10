@@ -27,6 +27,8 @@ typedef struct BO2SteamProviderV1 {
     int32_t (*pollEncryptedTicket)(void *context, uint64_t handle, void *destination,
                                   uint32_t capacity, uint32_t *requiredSize, uint32_t *steamResult);
     void (*releaseTicket)(void *context, uint64_t handle);
+    // -1 unknown/disconnected, 0 explicitly clear, 1 reported banned.
+    int32_t (*vacStatus)(void *context, uint32_t appID);
 } BO2SteamProviderV1;
 
 bool bo2_ios_set_steam_provider(const BO2SteamProviderV1 *provider);

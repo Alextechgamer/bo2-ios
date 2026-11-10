@@ -9,6 +9,11 @@
 
 import Foundation
 
+enum SteamSessionAuthentication {
+    case individual
+    case anonymousGameServer(appID: UInt32)
+}
+
 /// Manages the authenticated Steam session: login, heartbeat, reconnection, message routing.
 @MainActor
 class SteamSession {
@@ -19,6 +24,10 @@ class SteamSession {
         didSet { if oldValue != steamID { identityDidChange?(steamID) } }
     }
     var identityDidChange: (@MainActor (UInt64) -> Void)?
+    private(set) var vacBannedApps: [UInt32]? {
+        didSet { vacStatusDidChange?(vacBannedApps) }
+    }
+    var vacStatusDidChange: (@MainActor ([UInt32]?) -> Void)?
     private(set) var accountName: String = ""
     private(set) var personaName: String = ""
     private(set) var cellID: UInt32 = 0
@@ -31,13 +40,16 @@ class SteamSession {
 
     private let connection: any SteamCMTransport
     private let credentials: @MainActor () -> (accountName: String, refreshToken: String)?
+    private let authentication: SteamSessionAuthentication
 
     init(connection: any SteamCMTransport = SteamConnection(),
          credentials: @escaping @MainActor () -> (accountName: String, refreshToken: String)? = {
              SteamSignIn.credentialsForDock()
-         }, idleTimeout: TimeInterval = 60) {
+         }, idleTimeout: TimeInterval = 60,
+         authentication: SteamSessionAuthentication = .individual) {
         self.connection = connection
         self.credentials = credentials
+        self.authentication = authentication
         self.idleTimeout = idleTimeout.isFinite && idleTimeout > 0 ? idleTimeout : 60
     }
     let serverList = CMServerList()
@@ -67,12 +79,25 @@ class SteamSession {
     }
     private var pendingPICSJobs: [UInt64: PICSAccumulator] = [:]
     private let licenseListBox = LicenseListBox()
+    private let vacListBox = LicenseListBox()
 
     /// SteamID used for pre-logon messages.
     /// Universe=Public(1), Type=Individual(1), Instance=Desktop(1), AccountID=0
     /// → 76561197960265728. Using raw 0 causes EResult 5 (InvalidPassword) on
     /// some CM servers.
-    private static let preLogonSteamID: UInt64 = 76561197960265728
+    private var preLogonSteamID: UInt64 {
+        switch authentication {
+        case .individual: return 76561197960265728
+        case .anonymousGameServer: return 0x0140000000000000
+        }
+    }
+
+    private func logonCredentials() -> (accountName: String, refreshToken: String)? {
+        switch authentication {
+        case .individual: return credentials()
+        case .anonymousGameServer: return ("", "")
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -113,7 +138,9 @@ class SteamSession {
     }
 
     private func establishConnection(epoch: UInt64) async throws {
-        guard credentials() != nil else { throw SteamError.invalidCredentials }
+        guard logonCredentials() != nil else { throw SteamError.invalidCredentials }
+        if case .anonymousGameServer(let appID) = authentication,
+           ![UInt32(202990),212910].contains(appID) { throw SteamError.invalidMessage }
 
         connectionState = .connecting
 
@@ -135,6 +162,20 @@ class SteamSession {
             // Capture the license list Steam pushes right after logon.
             // Registered before connecting so the handler can never miss it.
             licenseListBox.reset()
+            vacListBox.reset()
+            vacBannedApps = nil
+            registerHandler(for: .clientVACBanStatus) { [weak self] message in
+                guard let self else { return }
+                // SteamKit's MsgClientVACBanStatus is a little-endian count
+                // followed by that many uint32 app IDs, not a protobuf body.
+                guard !message.isProtobuf, let apps = Self.decodeVACStatus(message.body) else {
+                    vacBannedApps = nil
+                    vacListBox.reset()
+                    return
+                }
+                vacBannedApps = apps
+                vacListBox.set(apps)
+            }
             registerHandler(for: .clientLicenseList) { [weak self] message in
                 guard let self else { return }
                 do {
@@ -157,7 +198,7 @@ class SteamSession {
             let helloData = SteamMessageCodec.encodeClientMessage(
                 eMsg: .clientHello,
                 body: CMsgClientHello().serialize(),
-                steamID: Self.preLogonSteamID,
+                steamID: preLogonSteamID,
                 sessionID: 0
             )
             try await connection.send(helloData)
@@ -166,7 +207,7 @@ class SteamSession {
             SteamLog.trace("Sent ClientHello (\(helloData.count) bytes)")
 
             // Try to log in with stored tokens, retrying up to 2 different servers on timeout/redirect
-            if let tokens = credentials() {
+            if let tokens = logonCredentials() {
                 var lastError: Error = SteamError.connectionTimeout
                 var loggedIn = false
                 for attempt in 1...2 {
@@ -180,7 +221,7 @@ class SteamSession {
                             let helloRetry = SteamMessageCodec.encodeClientMessage(
                                 eMsg: .clientHello,
                                 body: CMsgClientHello().serialize(),
-                                steamID: Self.preLogonSteamID,
+                                steamID: preLogonSteamID,
                                 sessionID: 0
                             )
                             try await connection.send(helloRetry)
@@ -228,6 +269,20 @@ class SteamSession {
     /// Waits for the push if it hasn't landed yet.
     func awaitLicenseList(timeout: TimeInterval = 15) async throws -> [UInt32] {
         try await licenseListBox.value(timeout: timeout)
+    }
+
+    func awaitVACBannedApps(timeout: TimeInterval = 15) async throws -> [UInt32] {
+        guard connectionState == .authenticated else { throw SteamError.disconnected }
+        return try await vacListBox.value(timeout: timeout)
+    }
+
+    private static func decodeVACStatus(_ body: Data) -> [UInt32]? {
+        guard body.count >= 4 else { return nil }
+        let count = body.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(as: UInt32.self)) }
+        guard count <= 16384, body.count == 4 + Int(count) * 4 else { return nil }
+        return (0..<Int(count)).map { index in
+            body.withUnsafeBytes { UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 4 + index * 4, as: UInt32.self)) }
+        }
     }
 
     /// Reset the idle disconnect timer — called after each activity
@@ -323,10 +378,16 @@ class SteamSession {
         logon.machineName = SteamDevice.name
         logon.clientOSType = -102  // macOS
 
+        let body: Data
+        switch authentication {
+        case .individual: body = logon.serialize()
+        case .anonymousGameServer(let appID): body = CMsgAnonymousGameServerLogon(appID: appID).serialize()
+        }
+
         let logonData = SteamMessageCodec.encodeClientMessage(
             eMsg: .clientLogon,
-            body: logon.serialize(),
-            steamID: Self.preLogonSteamID,
+            body: body,
+            steamID: preLogonSteamID,
             sessionID: 0
         )
 
@@ -420,11 +481,19 @@ class SteamSession {
                     return
                 }
 
-                self.steamID = message.header.steamid
-                guard self.steamID != 0 else {
+                let identity = message.header.steamid
+                guard identity != 0 else {
                     resumeThrowing(SteamError.invalidMessage)
                     return
                 }
+                if case .anonymousGameServer = self.authentication {
+                    guard (identity >> 56) == 1, ((identity >> 52) & 15) == 4,
+                          (identity & 0xffffffff) != 0 else {
+                        resumeThrowing(SteamError.invalidMessage)
+                        return
+                    }
+                }
+                self.steamID = identity
                 self.sessionID = message.header.clientSessionid
                 self.heartbeatInterval = heartbeatSecs
                 self.cellID = outCellID
@@ -510,6 +579,8 @@ class SteamSession {
 
         messageHandlers.removeAll()
         licenseListBox.reset()
+        vacListBox.reset()
+        vacBannedApps = nil
         connectionState = .disconnected
         steamID = 0
         accountName = ""
