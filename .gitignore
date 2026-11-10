@@ -14,6 +14,9 @@
 !/ios/SteamAuth/LICENSE-EXCEPTION.md
 !/ios/SteamAuth/UPSTREAM.md
 !/ios/SteamAuth/docs/STEAM_SIGNIN.md
+!/ios/SteamServices/
+!/ios/SteamServices/**/
+!/ios/SteamServices/**/*.swift
 !/ios/TouchControls.h
 !/ios/assemble_full.py
 !/ios/build_shader_library.py

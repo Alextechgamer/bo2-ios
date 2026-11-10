@@ -45,7 +45,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
                   CURRENT_PROJECT_VERSION="1",MARKETING_VERSION="0.1",IPHONEOS_DEPLOYMENT_TARGET="16.0",
                   SWIFT_VERSION="5.0")
     project=dict(name="BlackOpsII",targets={"BlackOpsII":dict(type="application",platform="iOS",
-                 sources=["FullGame.m",dict(path="SteamAuth",excludes=["COPYING","LICENSE-EXCEPTION.md","docs","UPSTREAM.md"])],
+                 sources=["FullGame.m","SteamServices",dict(path="SteamAuth",excludes=["COPYING","LICENSE-EXCEPTION.md","docs","UPSTREAM.md"])],
                  dependencies=[{"sdk":"AuthenticationServices.framework"}],settings={"base":settings})})
     out.parent.mkdir(parents=True,exist_ok=True)
     work.mkdir(parents=True,exist_ok=True)
@@ -65,6 +65,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         shutil.copyfile(src/"SteamInstaller.h",stage/"SteamInstaller.h")
         shutil.copyfile(src/"SteamSignInBridge.h",stage/"SteamSignInBridge.h")
         shutil.copytree(src/"SteamAuth",stage/"SteamAuth")
+        shutil.copytree(src/"SteamServices",stage/"SteamServices")
         spec=stage/"project.json"
         spec.write_text(json.dumps(project))
         command("xcodegen","generate","--spec",spec)

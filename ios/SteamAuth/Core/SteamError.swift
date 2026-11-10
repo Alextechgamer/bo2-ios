@@ -37,6 +37,7 @@ enum SteamError: LocalizedError, Equatable {
     /// or expired sign-in from a transient network failure.
     case logonDenied(UInt32)
     case invalidMessage
+    case serviceRefused(UInt32)
 
     // Library
     case appInfoNotFound(UInt32)
@@ -56,6 +57,8 @@ enum SteamError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
+        case .serviceRefused(let result):
+            return "Steam refused the service request (result \(result))."
         case .authenticationFailed(let reason):
             return reason
         case .invalidCredentials:
