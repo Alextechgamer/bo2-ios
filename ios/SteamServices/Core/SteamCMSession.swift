@@ -14,6 +14,10 @@ protocol SteamCMSession: AnyObject {
     var cellID: UInt32 { get }
     /// The logged-on account, 0 when not logged on.
     var steamID: UInt64 { get }
+    var identityDidChange: (@MainActor (UInt64) -> Void)? { get set }
+    /// Holds the shared connection while a game owns it; tokens are generation-safe.
+    func acquireRuntimeLease() throws -> UUID
+    func releaseRuntimeLease(_ lease: UUID)
 
     /// Connects and logs on when the session is not already.
     func ensureConnected() async throws

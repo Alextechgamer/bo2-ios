@@ -43,7 +43,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
                   INFOPLIST_KEY_UILaunchScreen_Generation="YES",INFOPLIST_KEY_UIRequiresFullScreen="YES",
                   INFOPLIST_KEY_UISupportedInterfaceOrientations="UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
                   CURRENT_PROJECT_VERSION="1",MARKETING_VERSION="0.1",IPHONEOS_DEPLOYMENT_TARGET="16.0",
-                  SWIFT_VERSION="5.0")
+                  SWIFT_VERSION="5.0",SWIFT_OBJC_BRIDGING_HEADER="SteamRuntimeProvider.h")
     project=dict(name="BlackOpsII",targets={"BlackOpsII":dict(type="application",platform="iOS",
                  sources=["FullGame.m","SteamServices",dict(path="SteamAuth",excludes=["COPYING","LICENSE-EXCEPTION.md","docs","UPSTREAM.md"])],
                  dependencies=[{"sdk":"AuthenticationServices.framework"}],settings={"base":settings})})
@@ -64,6 +64,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         shutil.copyfile(src/"FullGame.m",stage/"FullGame.m")
         shutil.copyfile(src/"SteamInstaller.h",stage/"SteamInstaller.h")
         shutil.copyfile(src/"SteamSignInBridge.h",stage/"SteamSignInBridge.h")
+        shutil.copyfile(src/"SteamRuntimeProvider.h",stage/"SteamRuntimeProvider.h")
         shutil.copytree(src/"SteamAuth",stage/"SteamAuth")
         shutil.copytree(src/"SteamServices",stage/"SteamServices")
         spec=stage/"project.json"

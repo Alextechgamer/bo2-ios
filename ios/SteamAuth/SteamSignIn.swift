@@ -14,6 +14,15 @@ import UIKit
 /// is the first user). The sign-in token lives only in the iOS Keychain
 /// (SteamTokenStore: this device only, available while unlocked).
 enum SteamSignIn {
+    private static let revisionLock = NSLock()
+    private static var storedRevision: UInt64 = 0
+    /// Changes synchronously with credential writes, before queued UI notifications.
+    /// Contains no account data and can be read by runtime worker callbacks.
+    static var revision: UInt64 {
+        revisionLock.lock()
+        defer { revisionLock.unlock() }
+        return storedRevision
+    }
     /// Posted on the main queue after a sign-in is stored or removed.
     static let didChange = Notification.Name("BO2SteamSignInDidChange")
 
@@ -51,7 +60,7 @@ enum SteamSignIn {
         let store = SteamTokenStore()
         store.saveTokens(accountName: accountName, refreshToken: refreshToken, accessToken: accessToken, steamID: 0)
         let saved = store.loadTokens()?.refreshToken == refreshToken
-        notifyChange()
+        if saved { notifyChange() }
         return saved
     }
 
@@ -77,6 +86,9 @@ enum SteamSignIn {
     }
 
     private static func notifyChange() {
+        revisionLock.lock()
+        storedRevision &+= 1
+        revisionLock.unlock()
         DispatchQueue.main.async { NotificationCenter.default.post(name: didChange, object: nil) }
     }
 

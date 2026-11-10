@@ -13,6 +13,7 @@ final class SteamGameAuthentication {
     private let session: any SteamCMSession
     private let now: @MainActor () -> TimeInterval
     private let timeout: TimeInterval
+    private let credentialRevision: @MainActor () -> UInt64
     private var generation: UInt64 = 0
     private var sequence: UInt64 = 0
     private var pending: [UInt32: UInt64] = [:]
@@ -24,10 +25,12 @@ final class SteamGameAuthentication {
 
     init(session: any SteamCMSession,
          now: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         timeout: TimeInterval = 20) {
+         timeout: TimeInterval = 20,
+         credentialRevision: @escaping @MainActor () -> UInt64 = { SteamSignIn.revision }) {
         self.session = session
         self.now = now
         self.timeout = timeout
+        self.credentialRevision = credentialRevision
     }
 
     func accountChanged() {
@@ -44,17 +47,19 @@ final class SteamGameAuthentication {
         guard appID != 0, announcedAppID == nil, gameTransition == nil else { throw SteamError.invalidMessage }
         sequence &+= 1
         let operation = sequence, accountGeneration = generation
+        let accountRevision = credentialRevision()
         gameTransition = operation
         defer { if gameTransition == operation { gameTransition = nil } }
         try await session.ensureConnected()
         try Task.checkCancellation()
-        guard generation == accountGeneration, session.steamID != 0 else { throw SteamError.disconnected }
+        guard generation == accountGeneration, credentialRevision() == accountRevision,
+              session.steamID != 0 else { throw SteamError.disconnected }
         let steamID = session.steamID
         do {
             try await session.sendClientMessage(eMsg: .clientGamesPlayed,
                 body: CMsgClientGamesPlayed.serialize(appID: appID))
             try Task.checkCancellation()
-            guard generation == accountGeneration, session.steamID == steamID,
+            guard generation == accountGeneration, credentialRevision() == accountRevision, session.steamID == steamID,
                   gameTransition == operation else { throw SteamError.disconnected }
             announcedSteamID = steamID
             announcedAppID = appID
@@ -62,11 +67,11 @@ final class SteamGameAuthentication {
             // A cancelled write may already have reached Steam. Clear presence
             // from an uncancelled task, but never send on a different account.
             let cleanup = Task { @MainActor in
-                guard generation == accountGeneration, session.steamID == steamID,
+                guard generation == accountGeneration, credentialRevision() == accountRevision, session.steamID == steamID,
                       gameTransition == operation else { return }
                 do { try await session.sendClientMessage(eMsg: .clientGamesPlayed, body: Data()) }
                 catch {
-                    if generation == accountGeneration, session.steamID == steamID {
+                    if generation == accountGeneration, credentialRevision() == accountRevision, session.steamID == steamID {
                         await session.disconnectGracefully()
                     }
                 }
@@ -81,13 +86,14 @@ final class SteamGameAuthentication {
         try Task.checkCancellation()
         guard gameTransition == nil else { throw SteamError.invalidMessage }
         let accountGeneration = generation, steamID = announcedSteamID
+        let accountRevision = credentialRevision()
         guard session.steamID == steamID, steamID != 0 else { throw SteamError.disconnected }
         sequence &+= 1
         let operation = sequence
         gameTransition = operation
         defer { if gameTransition == operation { gameTransition = nil } }
         try await session.sendClientMessage(eMsg: .clientGamesPlayed, body: Data())
-        guard generation == accountGeneration, session.steamID == steamID,
+        guard generation == accountGeneration, credentialRevision() == accountRevision, session.steamID == steamID,
               gameTransition == operation else { throw SteamError.disconnected }
         announcedAppID = nil
         announcedSteamID = 0
@@ -101,12 +107,14 @@ final class SteamGameAuthentication {
         guard pending.count < 128 else { throw SteamError.rateLimited }
         sequence &+= 1
         let operation = sequence, accountGeneration = generation
+        let accountRevision = credentialRevision()
         pending[appID] = operation
         defer { if pending[appID] == operation { pending.removeValue(forKey: appID) } }
 
         try await session.ensureConnected()
         try Task.checkCancellation()
-        guard generation == accountGeneration, session.steamID != 0 else { throw SteamError.disconnected }
+        guard generation == accountGeneration, credentialRevision() == accountRevision,
+              session.steamID != 0 else { throw SteamError.disconnected }
         let steamID = session.steamID
         let key = RateKey(steamID: steamID, appID: appID)
         let time = now()
@@ -121,7 +129,7 @@ final class SteamGameAuthentication {
         let reply = try await session.sendAndWait(eMsg: .clientRequestEncryptedAppTicket, body: body,
             responseEMsg: .clientRequestEncryptedAppTicketResponse, timeout: timeout)
         try Task.checkCancellation()
-        guard generation == accountGeneration, session.steamID == steamID,
+        guard generation == accountGeneration, credentialRevision() == accountRevision, session.steamID == steamID,
               pending[appID] == operation else { throw SteamError.disconnected }
         let response = try CMsgClientRequestEncryptedAppTicketResponse.deserialize(from: reply.body)
         guard response.result == 1 else { throw SteamError.serviceRefused(response.result) }

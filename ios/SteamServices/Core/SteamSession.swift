@@ -15,7 +15,10 @@ class SteamSession {
     // MARK: - Published State
 
     private(set) var connectionState: SteamConnectionState = .disconnected
-    private(set) var steamID: UInt64 = 0
+    private(set) var steamID: UInt64 = 0 {
+        didSet { if oldValue != steamID { identityDidChange?(steamID) } }
+    }
+    var identityDidChange: (@MainActor (UInt64) -> Void)?
     private(set) var accountName: String = ""
     private(set) var personaName: String = ""
     private(set) var cellID: UInt32 = 0
@@ -32,9 +35,10 @@ class SteamSession {
     init(connection: any SteamCMTransport = SteamConnection(),
          credentials: @escaping @MainActor () -> (accountName: String, refreshToken: String)? = {
              SteamSignIn.credentialsForDock()
-         }) {
+         }, idleTimeout: TimeInterval = 60) {
         self.connection = connection
         self.credentials = credentials
+        self.idleTimeout = idleTimeout.isFinite && idleTimeout > 0 ? idleTimeout : 60
     }
     let serverList = CMServerList()
     private var sessionID: Int32 = 0
@@ -51,7 +55,8 @@ class SteamSession {
     private var pendingLogonFailure: ((Error) -> Void)?
     private var logonTimeout: Task<Void, Never>?
     /// How long to stay connected after the last activity before auto-disconnecting (seconds)
-    private let idleTimeout: TimeInterval = 60
+    private let idleTimeout: TimeInterval
+    private var runtimeLeases: Set<UUID> = []
     private var jobIDCounter: UInt64 = 0
     private var pendingJobs: [UInt64: CheckedContinuation<SteamMessageCodec.IncomingMessage, Error>] = [:]
     private var messageHandlers: [UInt32: (SteamMessageCodec.IncomingMessage) -> Void] = [:]
@@ -70,6 +75,20 @@ class SteamSession {
     private static let preLogonSteamID: UInt64 = 76561197960265728
 
     // MARK: - Lifecycle
+
+    func acquireRuntimeLease() throws -> UUID {
+        guard runtimeLeases.count < 128 else { throw SteamError.rateLimited }
+        let lease = UUID()
+        runtimeLeases.insert(lease)
+        idleDisconnectTask?.cancel()
+        idleDisconnectTask = nil
+        return lease
+    }
+
+    func releaseRuntimeLease(_ lease: UUID) {
+        guard runtimeLeases.remove(lease) != nil else { return }
+        resetIdleTimer()
+    }
 
     /// Connect and authenticate using stored tokens (auto-login)
     func connectAndLogin() async throws {
@@ -214,6 +233,8 @@ class SteamSession {
     /// Reset the idle disconnect timer — called after each activity
     private func resetIdleTimer() {
         idleDisconnectTask?.cancel()
+        idleDisconnectTask = nil
+        guard runtimeLeases.isEmpty, connectionState == .authenticated else { return }
         idleDisconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64((self?.idleTimeout ?? 60) * 1_000_000_000))
             guard !Task.isCancelled else { return }
@@ -468,6 +489,8 @@ class SteamSession {
         reconnectTask = nil
         idleDisconnectTask?.cancel()
         idleDisconnectTask = nil
+
+        runtimeLeases.removeAll()
 
         // Cancel all pending jobs
         for (_, continuation) in pendingJobs {

@@ -141,6 +141,7 @@ static NSURL *GameDirectory(NSError **error) {
     UILabel *_status;
     SteamInstaller *_installer;
     UIButton *_steamAccount;
+    BO2SteamLaunch *_steamLaunch;
     BOOL _started;
     BOOL _checking;
     NSString *_server;
@@ -196,6 +197,12 @@ static NSURL *GameDirectory(NSError **error) {
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    NSString *steamMode = [NSUserDefaults.standardUserDefaults stringForKey:@"BO2RequestedSteamMode"];
+    if (Modes()[steamMode ?: @""] && !_started && !_checking) {
+        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"BO2RequestedSteamMode"];
+        [self startSteam:steamMode];
+        return;
+    }
     NSString *requested = [NSUserDefaults.standardUserDefaults stringForKey:@"BO2RequestedMode"];
     if (Modes()[requested ?: @""] && !_started) {
         [NSUserDefaults.standardUserDefaults removeObjectForKey:@"BO2RequestedMode"];
@@ -328,10 +335,37 @@ static NSURL *GameDirectory(NSError **error) {
     if (_installer || _started || _checking) return;
     [BO2SteamSignIn presentFromViewController:self];
 }
+- (void)finishSteamLaunch {
+    [_steamLaunch finish];
+    _steamLaunch = nil;
+}
+- (void)startSteam:(NSString *)mode {
+    if (_installer || _started || _checking || !Modes()[mode]) return;
+    NSError *error = nil;
+    NSURL *assets = GameDirectory(&error);
+    if (!assets) { _status.text = error.localizedDescription; return; }
+    NSURL *receiptURL = [NSBundle.mainBundle URLForResource:@"SteamOwnership" withExtension:@"plist"];
+    NSDictionary *receipt = receiptURL ? [NSDictionary dictionaryWithContentsOfURL:receiptURL] : nil;
+    _checking = YES;
+    _server = nil;
+    _status.text = @"Connecting to Steam…";
+    [BO2SteamRuntime prepareMode:mode assets:assets legacySteamID:[receipt[@"account"] unsignedLongLongValue]
+        completion:^(BO2SteamLaunch *launch, NSError *failure) {
+            self->_checking = NO;
+            if (!launch) {
+                self->_status.text = failure.localizedDescription;
+                NSLog(@"[steam-runtime] preparation failed");
+                return;
+            }
+            self->_steamLaunch = launch;
+            [self start:mode];
+            if (!self->_started) [self finishSteamLaunch];
+        }];
+}
 - (void)start:(NSString *)mode {
     if (_installer || _started || !Modes()[mode]) return;
     NSError *error = nil;
-    NSURL *game = GameDirectory(&error);
+    NSURL *game = _steamLaunch ? [NSURL fileURLWithPath:_steamLaunch.gameDirectory isDirectory:YES] : GameDirectory(&error);
     if (!game) { _status.text = error.localizedDescription; return; }
     NSURL *sections = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:
         [NSString stringWithFormat:@"Modes/%@/%@",mode,_server ? @"pluto_pe_sections.bin" : @"pe_sections.bin"]];
@@ -346,6 +380,12 @@ static NSURL *GameDirectory(NSError **error) {
     UIView *(*makeSurface)(CGRect) = (UIView *(*)(CGRect))dlsym(handle,"bo2_ios_create_surface");
     int (*entry)(const char *) = (int (*)(const char *))dlsym(handle,"bo2_ios_start");
     if (!makeSurface || !entry) { _status.text=@"Game entry point missing."; return; }
+    if (_steamLaunch && ![_steamLaunch installInHandle:handle]) {
+        _status.text = @"This game build does not support Steam sessions yet.";
+        NSLog(@"[steam-runtime] provider ABI unavailable");
+        return;
+    }
+    if (_steamLaunch) NSLog(@"[steam-runtime] provider installed before guest entry");
     if (_server) {
         bool (*transport)(const char*,uint16_t,bool)=dlsym(handle,"bo2_pluto_start");
         void (*queue)(const char*)=dlsym(handle,"bo2_cmd_queue");
@@ -386,6 +426,7 @@ static NSURL *GameDirectory(NSError **error) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         int result = entry(sections.fileSystemRepresentation);
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self finishSteamLaunch];
             [surface removeFromSuperview];
             self->_menu.hidden = NO;
             self->_status.text = [NSString stringWithFormat:@"%@ exited (%d). Reopen the app to start again.", Modes()[mode],result];
