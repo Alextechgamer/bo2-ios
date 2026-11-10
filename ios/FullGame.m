@@ -12,6 +12,42 @@ static NSDictionary<NSString *,NSString *> *Modes(void) {
     return @{@"sps":@"Campaign", @"mps":@"Multiplayer", @"zms":@"Zombies"};
 }
 
+// A direct join skips the retail lobby that normally submits the team and class.
+// Use the menu IDs advertised by this server and stop as soon as the player is armed.
+static void SelectInitialClass(void *handle, void (*queue)(const char *)) {
+    uint8_t **arena = dlsym(handle,"bo2_g_base");
+    if (!arena) return;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY,0), ^{
+        unsigned attempts=0;
+        for (unsigned i=0; i<90; ++i) {
+            sleep(1);
+            const uint8_t *base=*arena;
+            if (!base) continue;
+            uint32_t (^word)(uint32_t) = ^uint32_t(uint32_t offset) {
+                uint32_t value; memcpy(&value,base+offset,sizeof(value)); return value;
+            };
+            if (word(0x10e9d88)!=10) continue;
+            uint32_t cg=word(0x10616cc);
+            if (!cg || cg>0xffff0000u) continue;
+            uint32_t snap=word(cg+0x28);
+            if (!snap || snap>0xfffc0000u) continue;
+            uint32_t pm=word(snap+0x14), weapon=word(snap+0x1c8);
+            if (!pm && weapon) return;
+            if (pm!=5 || weapon) continue;
+            BOOL team=(attempts++%2)==0;
+            const char *menu=team ? "team_marinesopfor" : "changeclass";
+            for (unsigned j=0; j<32; ++j) {
+                uint32_t off=word(0x1133a7c+4*(0x80a+j));
+                if (!off || off>=65536 || strncmp((const char *)base+0x113922c+off,menu,strlen(menu)+1)) continue;
+                char command[100];
+                snprintf(command,sizeof(command),"cmd mr %u %u %s",word(0x10f300c),j,team?"autoassign":"class_assault");
+                queue(command);
+                break;
+            }
+        }
+    });
+}
+
 static void ConfigureRuntime(NSString *mode) {
     // Keep the upstream play_steam.sh execution settings. The desktop launcher
     // also enables named input pipes; UIKit sends events directly to the queue.
@@ -180,13 +216,14 @@ static NSURL *GameDirectory(NSError **error) {
     }
     _checking = YES;
     _status.text = @"Checking the private server…";
+    NSLog(@"Checking private %@ server",Modes()[mode]);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         int fd = socket(AF_INET,SOCK_DGRAM,0);
         struct sockaddr_in peer = {.sin_len=sizeof(peer),.sin_family=AF_INET,.sin_addr=ip,.sin_port=htons((uint16_t)port)};
         NSString *nonce = NSUUID.UUID.UUIDString;
         NSMutableData *query = [NSMutableData dataWithBytes:"\xff\xff\xff\xff" length:4];
         [query appendData:[[NSString stringWithFormat:@"getinfo %@",nonce] dataUsingEncoding:NSASCIIStringEncoding]];
-        BOOL online = NO;
+        BOOL online = NO, compatible = NO;
         if (fd >= 0 && !connect(fd,(struct sockaddr *)&peer,sizeof(peer))) {
             struct timeval timeout = {.tv_sec=1};
             setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
@@ -198,14 +235,22 @@ static NSURL *GameDirectory(NSError **error) {
                 NSString *reply=[[NSString alloc] initWithBytes:buffer+4 length:n-4 encoding:NSISOLatin1StringEncoding];
                 NSArray *fields=[reply componentsSeparatedByString:@"\\"];
                 if (![fields.firstObject hasPrefix:@"infoResponse"]) continue;
-                for (NSUInteger j=1; j+1<fields.count; j+=2)
-                    if ([fields[j] isEqual:@"challenge"] && [fields[j+1] isEqual:nonce]) online=YES;
+                NSDictionary *expected = [mode isEqualToString:@"mps"] ?
+                    @{@"sessionmode":@"0",@"protocol":@"2091"} : @{@"sessionmode":@"1",@"protocol":@"2089"};
+                NSMutableDictionary *info=[NSMutableDictionary new];
+                for (NSUInteger j=1; j+1<fields.count; j+=2) info[fields[j]]=fields[j+1];
+                online=[info[@"challenge"] isEqual:nonce];
+                compatible=[info[@"sessionmode"] isEqual:expected[@"sessionmode"]] &&
+                           [info[@"protocol"] isEqual:expected[@"protocol"]] && [info[@"isInGame"] isEqual:@"1"];
             }
         }
+        if (!online) NSLog(@"Private server query timed out (socket error %d)",errno);
+        else NSLog(@"Private server answered; compatible=%d",compatible);
         if (fd>=0) close(fd);
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_checking = NO;
             if (!online) { self->_status.text=@"Server did not answer. Check the address, Wi-Fi and Local Network access, then try again."; return; }
+            if (!compatible) { self->_status.text=@"The server is not running a compatible match for this mode."; return; }
             [NSUserDefaults.standardUserDefaults setObject:[parts componentsJoinedByString:@":"] forKey:[@"BO2Server." stringByAppendingString:mode]];
             self->_server=parts.firstObject;
             self->_port=(uint16_t)port;
@@ -266,7 +311,10 @@ static NSURL *GameDirectory(NSError **error) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,120*NSEC_PER_MSEC),dispatch_get_main_queue(),^{post(0x101,13,0xc0000001);});
         });
         NSString *command=[NSString stringWithFormat:@"connect %@:%u",_server,(unsigned)_port];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,65*NSEC_PER_SEC),dispatch_get_main_queue(),^{ queue(command.UTF8String); });
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,65*NSEC_PER_SEC),dispatch_get_main_queue(),^{
+            queue(command.UTF8String);
+            if (mp && ![NSProcessInfo.processInfo.arguments containsObject:@"-PlutoniumPairTest"]) SelectInitialClass(handle,queue);
+        });
     }
     _started = YES;
     UIView *surface = makeSurface(self.view.bounds);

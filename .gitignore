@@ -13,3 +13,8 @@
 !/ios/package_game.py
 !/ios/steam_install_server.py
 !/ios/steam_receipt.py
+!/lan/
+!/lan/lan_tunnel.py
+!/lan/serve_private.py
+!/lan/verify_pair.py
+!/lan/verify_tranzit.py

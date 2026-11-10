@@ -16,7 +16,43 @@ python3 ios/package_game.py "$BUILD" "$GAME_ZIP" "$OUTPUT_IPA" "$WORK" \
   --receipt "$PRIVATE/SteamOwnership.plist"
 ```
 
-For **Join Private Server**, also pass `--lan-root "$LAN_BUILD"`. Under each of `mps/` and `zms/`, provide the LAN-capable mode framework and its `pluto_pe_sections.bin`. The launcher checks the address entered on the phone with a UDP challenge before starting the selected mode.
+For **Join Private Server**, also pass `--lan-root "$LAN_BUILD"`. Under each of `mps/` and `zms/`, provide the LAN-capable mode framework and its `pluto_pe_sections.bin`. The launcher checks the server's challenge response, protocol, session mode and active-match flag. On a Multiplayer direct join it uses the server's advertised menu IDs to request a team and assault class.
+
+## Host a private match
+
+On Windows, supply a private installation directory containing `Plutonium/bin/plutonium-bootstrapper-win32.exe`, the r5369 runtime and storage files, and your licensed installation under `game/`. These commands each start a dedicated process and print its PID. Supply the Windows host's LAN IPv4 address in `$env:SERVER_LAN_IP`.
+
+```powershell
+py -3 lan/serve_private.py aftermath $env:SERVER_LAN_IP --root $env:PRIVATE_INSTALL
+py -3 lan/serve_private.py tranzit $env:SERVER_LAN_IP --root $env:PRIVATE_INSTALL
+```
+
+Aftermath uses UDP port 24985 and TranZit uses UDP port 24988. Permit incoming traffic on the selected ports from the players' local network. In **Join Private Server**, choose the matching mode and enter the Windows host's LAN address and port. Each server writes its log inside the private installation directory.
+
+### Optional relay through a Mac
+
+Use this setup when the Windows game host is on a different network and the iPhone shares Wi-Fi with a Mac. The Mac and Windows host must be connected to the same Tailscale network. The iPhone only needs access to the Mac's Wi-Fi address.
+
+1. On Windows, start each required dedicated server bound to loopback, substituting `127.0.0.1` for `$env:SERVER_LAN_IP` in the commands above.
+2. On the Mac, start the gateway with its Wi-Fi interface address and subnet prefix, its Tailscale IPv4 address, and the Windows host's Tailscale IPv4 address. Permit UDP 24985 and 24988 from the Wi-Fi subnet and TCP 29489 from the Windows host over Tailscale.
+
+   ```sh
+   python3 lan/lan_tunnel.py gateway "$MAC_WIFI_CIDR" "$MAC_TAILNET_IP" "$WINDOWS_TAILNET_IP"
+   ```
+
+3. On Windows, run the forwarder and leave both bridge processes running while playing.
+
+   ```powershell
+   py -3 lan/lan_tunnel.py forward $env:MAC_TAILNET_IP
+   ```
+
+4. Join the Mac's Wi-Fi IPv4 address with the selected game port on the phone. The gateway accepts traffic from its configured Wi-Fi subnet and accepts a tunnel from the specified Windows peer. The forwarder sends the game packets to the loopback dedicated servers.
+
+## Verify an instrumented two-player run
+
+The offline verifiers read an existing `match.log`, `ios.jsonl.gz` and `windows.jsonl` in a private run directory. They require the staged event and snapshot records produced by the game test instrumentation. Ordinary server logs alone do not contain those records.
+
+Run `python3 lan/verify_pair.py "$PRIVATE_RUN"` for Aftermath or `python3 lan/verify_tranzit.py "$PRIVATE_RUN"` for Zombies. The Aftermath verifier checks observed movement, damage, kills and armed respawns. The Zombies verifier checks observed movement, zombie kills and reciprocal revives. Results print to the terminal.
 
 ## Optional installation service
 
