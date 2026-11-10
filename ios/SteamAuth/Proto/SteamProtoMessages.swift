@@ -11,6 +11,73 @@
 
 import Foundation
 
+struct CMsgClientGamesPlayed {
+    static func serialize(appID: UInt32?) -> Data {
+        guard let appID else { return Data() }
+        var game = ProtobufEncoder()
+        game.writeFixed64(fieldNumber: 2, value: UInt64(appID))
+        var message = ProtobufEncoder()
+        message.writeSubmessage(fieldNumber: 1, value: game.data)
+        return message.data
+    }
+}
+
+// Steam CM encrypted-ticket messages. Preserve the nested envelope verbatim;
+// its metadata and unknown fields are part of the ticket's encoded format.
+struct CMsgClientRequestEncryptedAppTicket {
+    let appID: UInt32
+    let userData: Data
+    func serialize() -> Data {
+        var encoder = ProtobufEncoder()
+        encoder.writeUInt32(fieldNumber: 1, value: appID)
+        encoder.writeBytes(fieldNumber: 2, value: userData)
+        return encoder.data
+    }
+}
+
+struct CMsgClientRequestEncryptedAppTicketResponse {
+    private(set) var appID: UInt32 = 0
+    private(set) var result: UInt32 = 2
+    private(set) var encodedTicket = Data()
+
+    static func deserialize(from data: Data) throws -> Self {
+        guard data.count <= 1024 * 1024 else { throw SteamError.invalidMessage }
+        var decoder = ProtobufDecoder(data), message = Self()
+        while let tag = try decoder.readTag() {
+            guard tag.fieldNumber != 0 else { throw SteamError.invalidMessage }
+            switch tag.fieldNumber {
+            case 1:
+                guard tag.wireType == .varint else { throw SteamError.invalidMessage }
+                let value = try decoder.readVarint()
+                guard value <= UInt32.max else { throw SteamError.invalidMessage }
+                message.appID = UInt32(value)
+            case 2:
+                guard tag.wireType == .varint else { throw SteamError.invalidMessage }
+                message.result = UInt32(truncatingIfNeeded: try decoder.readVarint())
+            case 3:
+                guard tag.wireType == .lengthDelimited else { throw SteamError.invalidMessage }
+                message.encodedTicket = try decoder.readBytes()
+            default: try decoder.skip(wireType: tag.wireType)
+            }
+        }
+        return message
+    }
+
+    func validateEncryptedTicket() throws {
+        guard !encodedTicket.isEmpty, encodedTicket.count <= 64 * 1024 else { throw SteamError.invalidMessage }
+        var decoder = ProtobufDecoder(encodedTicket)
+        var hasPayload = false
+        while let tag = try decoder.readTag() {
+            guard tag.fieldNumber != 0 else { throw SteamError.invalidMessage }
+            if tag.fieldNumber == 5 {
+                guard tag.wireType == .lengthDelimited else { throw SteamError.invalidMessage }
+                hasPayload = !(try decoder.readBytes()).isEmpty
+            } else { try decoder.skip(wireType: tag.wireType) }
+        }
+        guard hasPayload else { throw SteamError.invalidMessage }
+    }
+}
+
 // MARK: - Steam Protobuf Message Stubs
 //
 // These are hand-written Swift structs that mirror the essential Steam protobuf messages.

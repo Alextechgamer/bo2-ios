@@ -28,12 +28,15 @@ enum EMsg: UInt32 {
 
     case multi = 1
     case clientHeartBeat = 703
+    case clientGamesPlayed = 742
     case clientHello = 4006
     case clientLogon = 5514
-    case clientLogonResponse = 5515
-    case clientLogOff = 5516
-    case clientLoggedOff = 5517
+    case clientLogonResponse = 751
+    case clientLogOff = 706
+    case clientLoggedOff = 757
     case clientLicenseList = 780
+    case clientRequestEncryptedAppTicket = 5526
+    case clientRequestEncryptedAppTicketResponse = 5527
     case clientPICSProductInfoRequest = 8903
     case clientPICSProductInfoResponse = 8904
     case clientPICSAccessTokenRequest = 8905

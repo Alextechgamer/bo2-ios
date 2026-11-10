@@ -311,9 +311,8 @@ class SteamSession {
 
         // No logon bytes, token fragments or token claims are logged.
 
-        // ClientLogonResponse (EMsg 5515) is NOT job-correlated — it's an unsolicited push.
+        // ClientLogonResponse (EMsg 751) is not job-correlated; it is a push.
         // Register a one-time handler that resolves the continuation when the response arrives.
-        // Also handle legacy EMsg 751 (old CMsgClientLogOnResponse numbering).
         let resumeOnce = LogonResumeGuard()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             // All resume paths funnel through these so the continuation resumes
@@ -328,7 +327,6 @@ class SteamSession {
             let cleanupHandlers = { [weak self] in
                 guard self?.sessionEpoch == epoch else { return }
                 self?.messageHandlers.removeValue(forKey: EMsg.clientLogonResponse.rawValue)
-                self?.messageHandlers.removeValue(forKey: 751)
                 self?.messageHandlers.removeValue(forKey: EMsg.clientLoggedOff.rawValue)
                 self?.pendingLogonFailure = nil
                 self?.logonTimeout?.cancel()
@@ -348,7 +346,7 @@ class SteamSession {
                 let outCellID: UInt32
 
                 if message.isProtobuf {
-                    // EMsg 5515: standard protobuf ClientLogonResponse
+                    // The same EMsg 751 supports protobuf and legacy bodies.
                     do {
                         let logonResponse = try CMsgClientLogonResponse.deserialize(from: message.body)
                         eResultCode = UInt32(logonResponse.eresult)
@@ -418,7 +416,6 @@ class SteamSession {
             }
 
             messageHandlers[EMsg.clientLogonResponse.rawValue] = handleLogonResponse
-            messageHandlers[751] = handleLogonResponse  // Legacy EMsg numbering
             pendingLogonFailure = { error in
                 cleanupHandlers()
                 resumeThrowing(error)
@@ -521,6 +518,18 @@ class SteamSession {
     }
 
     // MARK: - Message Sending
+
+    func sendClientMessage(eMsg: EMsg, body: Data) async throws {
+        try validateRequest(timeout: 120)
+        let epoch = sessionEpoch
+        let data = SteamMessageCodec.encodeClientMessage(eMsg: eMsg, body: body,
+            steamID: steamID, sessionID: sessionID)
+        try await connection.send(data)
+        try Task.checkCancellation()
+        guard sessionEpoch == epoch, connectionState == .authenticated,
+              closingTask == nil else { throw SteamError.disconnected }
+        resetIdleTimer()
+    }
 
     /// Get a unique job ID for request/response correlation
     func nextJobID() -> UInt64 {
@@ -722,7 +731,6 @@ class SteamSession {
         case EMsg.multi.rawValue: return "Multi"
         case EMsg.clientLogon.rawValue: return "ClientLogon"
         case EMsg.clientLogonResponse.rawValue: return "ClientLogonResponse"
-        case 751: return "ClientLogOnResponse(legacy)"
         case EMsg.clientLoggedOff.rawValue: return "ClientLoggedOff"
         case EMsg.clientHeartBeat.rawValue: return "ClientHeartBeat"
         case EMsg.clientHello.rawValue: return "ClientHello"
@@ -769,8 +777,10 @@ class SteamSession {
         switch message.rawEMsg {
         case EMsg.clientLoggedOff.rawValue:
             SteamLog.trace("Received ClientLoggedOff")
-            handleDisconnect(error: nil)
-        case 751:
+            // An explicit server logoff is not a transient transport outage.
+            // Clear jobs/identity and let the caller decide when to sign in.
+            disconnect()
+        case EMsg.clientLogonResponse.rawValue:
             // Late-arriving ClientLogOnResponse (handlers already cleaned up by timeout).
             // Parse eresult so we can log it accurately.
             if !message.isProtobuf, message.body.count >= 4 {

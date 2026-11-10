@@ -31,6 +31,7 @@ final class BO2SteamServices: ObservableObject {
 
     @Published private(set) var state: BO2SteamServiceState = .signedOut
     let session: any SteamCMSession
+    let authentication: SteamGameAuthentication
     private let credentialsAvailable: @MainActor () -> Bool
     private let fetchOwnedApps: @MainActor () async throws -> [SteamAppInfo]
     private var generation: UInt64 = 0
@@ -42,6 +43,7 @@ final class BO2SteamServices: ObservableObject {
          credentialsAvailable: @escaping @MainActor () -> Bool = { SteamSignIn.isSignedIn },
          fetchOwnedApps: (@MainActor () async throws -> [SteamAppInfo])? = nil) {
         self.session = session
+        self.authentication = SteamGameAuthentication(session: session)
         self.credentialsAvailable = credentialsAvailable
         let fetcher = SteamLibraryFetcher(session: session)
         self.fetchOwnedApps = fetchOwnedApps ?? { try await fetcher.fetchOwnedApps() }
@@ -59,6 +61,7 @@ final class BO2SteamServices: ObservableObject {
     }
 
     func accountChanged() async {
+        authentication.accountChanged()
         generation &+= 1
         refreshTask?.cancel()
         refreshTask = nil

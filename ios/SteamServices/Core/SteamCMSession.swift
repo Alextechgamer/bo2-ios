@@ -19,6 +19,8 @@ protocol SteamCMSession: AnyObject {
     func ensureConnected() async throws
     /// Ends the previous account's connection before another one starts.
     func disconnectGracefully() async
+    /// Writes an authenticated client notification; it is not a server acknowledgement.
+    func sendClientMessage(eMsg: EMsg, body: Data) async throws
     /// The owned package IDs Steam pushes after logon.
     func awaitLicenseList(timeout: TimeInterval) async throws -> [UInt32]
     /// Sends a client message and waits for its response.
