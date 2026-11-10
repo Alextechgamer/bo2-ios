@@ -4,12 +4,51 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#if __has_include("PhonePairProbe.h")
-#import "PhonePairProbe.h"
-#endif
+#include <poll.h>
+#include <ifaddrs.h>
 
 static NSDictionary<NSString *,NSString *> *Modes(void) {
     return @{@"sps":@"Campaign", @"mps":@"Multiplayer", @"zms":@"Zombies"};
+}
+
+static NSDictionary *ServerInfo(const void *bytes, size_t length, NSString *nonce) {
+    if (length<4 || memcmp(bytes,"\xff\xff\xff\xff",4)) return nil;
+    NSString *reply=[[NSString alloc] initWithBytes:(const char *)bytes+4 length:length-4 encoding:NSISOLatin1StringEncoding];
+    NSArray *fields=[reply componentsSeparatedByString:@"\\"];
+    if (![fields.firstObject hasPrefix:@"infoResponse"]) return nil;
+    NSMutableDictionary *info=[NSMutableDictionary new];
+    for (NSUInteger j=1; j+1<fields.count; j+=2) info[fields[j]]=fields[j+1];
+    return [info[@"challenge"] isEqual:nonce] ? info : nil;
+}
+
+static NSDictionary *WiredServerInfo(uint16_t port, NSString *nonce) {
+    int listener=socket(AF_INET,SOCK_STREAM,0);
+    if (listener<0) return nil;
+    int one=1;
+    setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&one,sizeof(one));
+    struct sockaddr_in local={.sin_len=sizeof(local),.sin_family=AF_INET,
+                              .sin_port=htons(19469),.sin_addr={htonl(INADDR_LOOPBACK)}};
+    struct pollfd pfd={.fd=listener,.events=POLLIN};
+    int client=-1;
+    if (!bind(listener,(struct sockaddr *)&local,sizeof(local)) && !listen(listener,1) && poll(&pfd,1,10000)>0)
+        client=accept(listener,NULL,NULL);
+    close(listener);
+    if (client<0) return nil;
+    struct timeval timeout={.tv_sec=3};
+    setsockopt(client,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+    setsockopt(client,SOL_SOCKET,SO_NOSIGPIPE,&one,sizeof(one));
+    NSData *request=[[NSString stringWithFormat:@"%u %@\n",(unsigned)port,nonce] dataUsingEncoding:NSASCIIStringEncoding];
+    NSMutableData *reply=[NSMutableData new];
+    if (send(client,request.bytes,request.length,0)==(ssize_t)request.length) {
+        char buffer[2048];
+        while (reply.length<8192) {
+            ssize_t n=recv(client,buffer,sizeof(buffer),0);
+            if (n<=0) break;
+            [reply appendBytes:buffer length:n];
+        }
+    }
+    close(client);
+    return ServerInfo(reply.bytes,reply.length,nonce);
 }
 
 // A direct join skips the retail lobby that normally submits the team and class.
@@ -32,7 +71,7 @@ static void SelectInitialClass(void *handle, void (*queue)(const char *)) {
             uint32_t snap=word(cg+0x28);
             if (!snap || snap>0xfffc0000u) continue;
             uint32_t pm=word(snap+0x14), weapon=word(snap+0x1c8);
-            if (!pm && weapon) return;
+            if (!pm && weapon) { NSLog(@"Private Multiplayer player spawned with a weapon"); return; }
             if (pm!=5 || weapon) continue;
             BOOL team=(attempts++%2)==0;
             const char *menu=team ? "team_marinesopfor" : "changeclass";
@@ -160,14 +199,7 @@ static NSURL *GameDirectory(NSError **error) {
     NSString *requested = [NSUserDefaults.standardUserDefaults stringForKey:@"BO2RequestedMode"];
     if (Modes()[requested ?: @""] && !_started) {
         [NSUserDefaults.standardUserDefaults removeObjectForKey:@"BO2RequestedMode"];
-        if ([NSProcessInfo.processInfo.arguments containsObject:@"-PlutoniumLANTest"]) {
-            _wired = YES;
-            _server = [NSBundle.mainBundle objectForInfoDictionaryKey:@"BO2WiredServer"];
-            _port = 24985; // Virtual endpoint used by the existing wired relay for both modes.
-            if (_server.length) [self start:requested];
-        } else if ([NSProcessInfo.processInfo.arguments containsObject:@"-BO2JoinPreset"]) {
-            [self join:requested address:[self savedAddress:requested]];
-        } else [self start:requested];
+        [self start:requested];
     }
 }
 - (NSString *)savedAddress:(NSString *)mode {
@@ -223,38 +255,48 @@ static NSURL *GameDirectory(NSError **error) {
         NSString *nonce = NSUUID.UUID.UUIDString;
         NSMutableData *query = [NSMutableData dataWithBytes:"\xff\xff\xff\xff" length:4];
         [query appendData:[[NSString stringWithFormat:@"getinfo %@",nonce] dataUsingEncoding:NSASCIIStringEncoding]];
-        BOOL online = NO, compatible = NO;
+        NSDictionary *info=nil;
+        BOOL wired=NO;
         if (fd >= 0 && !connect(fd,(struct sockaddr *)&peer,sizeof(peer))) {
             struct timeval timeout = {.tv_sec=1};
             setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
-            for (int i=0; i<6 && !online; i++) {
+            for (int i=0; i<6 && !info; i++) {
                 if (send(fd,query.bytes,query.length,0)<0) { usleep(250000); continue; }
                 char buffer[8192];
                 ssize_t n=recv(fd,buffer,sizeof(buffer),0);
-                if (n<=4 || memcmp(buffer,"\xff\xff\xff\xff",4)) continue;
-                NSString *reply=[[NSString alloc] initWithBytes:buffer+4 length:n-4 encoding:NSISOLatin1StringEncoding];
-                NSArray *fields=[reply componentsSeparatedByString:@"\\"];
-                if (![fields.firstObject hasPrefix:@"infoResponse"]) continue;
-                NSDictionary *expected = [mode isEqualToString:@"mps"] ?
-                    @{@"sessionmode":@"0",@"protocol":@"2091"} : @{@"sessionmode":@"1",@"protocol":@"2089"};
-                NSMutableDictionary *info=[NSMutableDictionary new];
-                for (NSUInteger j=1; j+1<fields.count; j+=2) info[fields[j]]=fields[j+1];
-                online=[info[@"challenge"] isEqual:nonce];
-                compatible=[info[@"sessionmode"] isEqual:expected[@"sessionmode"]] &&
-                           [info[@"protocol"] isEqual:expected[@"protocol"]] && [info[@"isInGame"] isEqual:@"1"];
+                if (n>0) info=ServerInfo(buffer,(size_t)n,nonce);
             }
         }
-        if (!online) NSLog(@"Private server query timed out (socket error %d)",errno);
-        else NSLog(@"Private server answered; compatible=%d",compatible);
+        if (!info) {
+            int netError=errno;
+            struct ifaddrs *list=NULL;
+            BOOL wifi=NO;
+            if (!getifaddrs(&list)) {
+                for (struct ifaddrs *it=list; it; it=it->ifa_next)
+                    if (it->ifa_addr && it->ifa_addr->sa_family==AF_INET && !strcmp(it->ifa_name,"en0")) wifi=YES;
+                freeifaddrs(list);
+            }
+            NSLog(@"Private UDP query failed: error %d, Wi-Fi IPv4 available=%d",netError,wifi);
+        }
         if (fd>=0) close(fd);
+        if (!info && [parts.firstObject isEqual:[NSBundle.mainBundle objectForInfoDictionaryKey:@"BO2PrivateServer"]]
+            && (port==24985 || port==24988)) {
+            dispatch_async(dispatch_get_main_queue(),^{self->_status.text=@"Checking the Mac USB connection…";});
+            info=WiredServerInfo((uint16_t)port,nonce);
+            wired=info!=nil;
+        }
+        BOOL mp=[mode isEqualToString:@"mps"];
+        BOOL compatible=[info[@"sessionmode"] isEqual:mp?@"0":@"1"] && [info[@"protocol"] isEqual:mp?@"2091":@"2089"] &&
+                        [info[@"isInGame"] isEqual:@"1"];
+        if (info) NSLog(@"Private server answered over %@, compatible=%d",wired?@"USB":@"Wi-Fi",compatible);
         dispatch_async(dispatch_get_main_queue(), ^{
             self->_checking = NO;
-            if (!online) { self->_status.text=@"Server did not answer. Check the address, Wi-Fi and Local Network access, then try again."; return; }
+            if (!info) { self->_status.text=@"Server did not answer. Check Wi-Fi and Local Network access, or connect to the Mac with USB and try again."; return; }
             if (!compatible) { self->_status.text=@"The server is not running a compatible match for this mode."; return; }
             [NSUserDefaults.standardUserDefaults setObject:[parts componentsJoinedByString:@":"] forKey:[@"BO2Server." stringByAppendingString:mode]];
             self->_server=parts.firstObject;
             self->_port=(uint16_t)port;
-            self->_wired=NO;
+            self->_wired=wired;
             [self start:mode];
         });
     });
@@ -303,9 +345,6 @@ static NSURL *GameDirectory(NSError **error) {
             _status.text=@"Could not start the private server connection."; return;
         }
         BOOL mp=[mode isEqualToString:@"mps"];
-#if __has_include("PhonePairProbe.h")
-        if ([NSProcessInfo.processInfo.arguments containsObject:@"-PlutoniumPairTest"]) StartPhonePair(handle,mp,_wired);
-#endif
         if (mp) dispatch_after(dispatch_time(DISPATCH_TIME_NOW,30*NSEC_PER_SEC),dispatch_get_main_queue(),^{
             post(0x100,13,1);
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,120*NSEC_PER_MSEC),dispatch_get_main_queue(),^{post(0x101,13,0xc0000001);});
@@ -313,12 +352,26 @@ static NSURL *GameDirectory(NSError **error) {
         NSString *command=[NSString stringWithFormat:@"connect %@:%u",_server,(unsigned)_port];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,65*NSEC_PER_SEC),dispatch_get_main_queue(),^{
             queue(command.UTF8String);
-            if (mp && ![NSProcessInfo.processInfo.arguments containsObject:@"-PlutoniumPairTest"]) SelectInitialClass(handle,queue);
+            if (mp) SelectInitialClass(handle,queue);
         });
     }
     _started = YES;
     UIView *surface = makeSurface(self.view.bounds);
     [self.view addSubview:surface];
+    if (_server) {
+        UILabel *notice=[UILabel new];
+        notice.text=_wired ? @"Loading private match over USB…" : @"Loading private match over Wi-Fi…";
+        notice.textColor=UIColor.whiteColor;
+        notice.backgroundColor=[UIColor.blackColor colorWithAlphaComponent:0.75];
+        notice.font=[UIFont preferredFontForTextStyle:UIFontTextStyleCallout];
+        notice.translatesAutoresizingMaskIntoConstraints=NO;
+        [self.view addSubview:notice];
+        [NSLayoutConstraint activateConstraints:@[
+            [notice.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+            [notice.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8]
+        ]];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,65*NSEC_PER_SEC),dispatch_get_main_queue(),^{ [notice removeFromSuperview]; });
+    }
     _menu.hidden = YES;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         int result = entry(sections.fileSystemRepresentation);

@@ -18,3 +18,5 @@
 !/lan/serve_private.py
 !/lan/verify_pair.py
 !/lan/verify_tranzit.py
+!/lan/usb_join_fallback.py
+!/lan/usb_mux.py

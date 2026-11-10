@@ -3,6 +3,7 @@
 The output volume needs space for the unpacked game, signed app and final ZIP.
 """
 import argparse
+from ipaddress import IPv4Address
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ def command(*args):
     subprocess.run([str(a) for a in args],check=True)
 
 
-def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin, lan_root):
+def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin, lan_root, private_server):
     root, out, work = root.resolve(), out.resolve(), work.resolve()
     src = Path(__file__).resolve().parent
     # Require all three linked game binaries and generated memory sections before packaging.
@@ -78,6 +79,8 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         info_path=app/"Info.plist"
         info=plistlib.loads(info_path.read_bytes())
         info["NSLocalNetworkUsageDescription"] = "Connect to a private game server on your local network."
+        if private_server:
+            info["BO2PrivateServer"] = str(private_server)
         if library_origin:
             info["GameLibraryOrigin"] = library_origin
         info.setdefault("CFBundleURLTypes",[]).append(dict(CFBundleURLName="Steam library callback",
@@ -125,5 +128,6 @@ if __name__=="__main__":
     p.add_argument("--receipt", required=True, type=Path, help="Your private Steam ownership plist")
     p.add_argument("--library-origin", help="HTTPS origin of your private installation service")
     p.add_argument("--lan-root", type=Path, help="Prebuilt LAN frameworks and sections in mps/ and zms/")
+    p.add_argument("--private-server", type=IPv4Address, help="Private IPv4 gateway preset for the Join menu and USB fallback")
     a=p.parse_args()
-    package(a.root,a.game_zip,a.output,a.team,a.work,a.bundle_id,a.receipt,a.library_origin,a.lan_root)
+    package(a.root,a.game_zip,a.output,a.team,a.work,a.bundle_id,a.receipt,a.library_origin,a.lan_root,a.private_server)

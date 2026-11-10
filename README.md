@@ -48,6 +48,20 @@ Use this setup when the Windows game host is on a different network and the iPho
 
 4. Join the Mac's Wi-Fi IPv4 address with the selected game port on the phone. The gateway accepts traffic from its configured Wi-Fi subnet and accepts a tunnel from the specified Windows peer. The forwarder sends the game packets to the loopback dedicated servers.
 
+### USB fallback for a Mac-connected iPhone
+
+When packaging the app, pass `--private-server "$GATEWAY_IP"` along with `--lan-root`. Choose the private LAN IPv4 address that the Mac can use to reach the game server. In the separate Mac relay setup above, use the Mac gateway's Wi-Fi address and keep both relay processes running.
+
+Plug one trusted iPhone into the Mac, then start the USB helper on the Mac with the same address.
+
+```sh
+python3 lan/usb_join_fallback.py "$GATEWAY_IP"
+```
+
+In **Join Private Server**, use the configured address and the selected mode's standard port. The phone first sends a direct UDP query. If it times out, the phone opens a loopback control port and the helper uses the Mac's system usbmuxd service to forward the compatibility query. After a compatible reply, it forwards game packets over the cable. The launcher displays the selected transport while the match loads.
+
+On the tested iPhone, the direct Wi-Fi query timed out. The USB path returned the compatibility reply, established the game connection and loaded the map. The private server recorded the client joining.
+
 ## Verify an instrumented two-player run
 
 The offline verifiers read an existing `match.log`, `ios.jsonl.gz` and `windows.jsonl` in a private run directory. They require the staged event and snapshot records produced by the game test instrumentation. Ordinary server logs alone do not contain those records.
