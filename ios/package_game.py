@@ -42,9 +42,11 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
                   DEVELOPMENT_TEAM=team,CODE_SIGN_STYLE="Automatic",GENERATE_INFOPLIST_FILE="YES",
                   INFOPLIST_KEY_UILaunchScreen_Generation="YES",INFOPLIST_KEY_UIRequiresFullScreen="YES",
                   INFOPLIST_KEY_UISupportedInterfaceOrientations="UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
-                  CURRENT_PROJECT_VERSION="1",MARKETING_VERSION="0.1",IPHONEOS_DEPLOYMENT_TARGET="16.0")
+                  CURRENT_PROJECT_VERSION="1",MARKETING_VERSION="0.1",IPHONEOS_DEPLOYMENT_TARGET="16.0",
+                  SWIFT_VERSION="5.0")
     project=dict(name="BlackOpsII",targets={"BlackOpsII":dict(type="application",platform="iOS",
-                 sources=["FullGame.m"],dependencies=[{"sdk":"AuthenticationServices.framework"}],settings={"base":settings})})
+                 sources=["FullGame.m",dict(path="SteamAuth",excludes=["COPYING","LICENSE-EXCEPTION.md","docs","UPSTREAM.md"])],
+                 dependencies=[{"sdk":"AuthenticationServices.framework"}],settings={"base":settings})})
     out.parent.mkdir(parents=True,exist_ok=True)
     work.mkdir(parents=True,exist_ok=True)
     with ZipFile(game_zip) as game, tempfile.TemporaryDirectory(dir=work) as folder:
@@ -61,6 +63,8 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
             raise RuntimeError("Insufficient space to stage the complete game on the selected volume")
         shutil.copyfile(src/"FullGame.m",stage/"FullGame.m")
         shutil.copyfile(src/"SteamInstaller.h",stage/"SteamInstaller.h")
+        shutil.copyfile(src/"SteamSignInBridge.h",stage/"SteamSignInBridge.h")
+        shutil.copytree(src/"SteamAuth",stage/"SteamAuth")
         spec=stage/"project.json"
         spec.write_text(json.dumps(project))
         command("xcodegen","generate","--spec",spec)
@@ -86,6 +90,10 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         info.setdefault("CFBundleURLTypes",[]).append(dict(CFBundleURLName="Steam library callback",
                                                          CFBundleURLSchemes=["bo2library"]))
         info_path.write_bytes(plistlib.dumps(info))
+        notices=app/"SteamAuthNotices"
+        notices.mkdir()
+        for name in ("COPYING","LICENSE-EXCEPTION.md","UPSTREAM.md"):
+            shutil.copyfile(src/"SteamAuth"/name,notices/name)
         shutil.copyfile(receipt, app/"SteamOwnership.plist")
         frameworks=app/"Frameworks"
         frameworks.mkdir(exist_ok=True)

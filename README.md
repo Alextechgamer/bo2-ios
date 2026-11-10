@@ -16,7 +16,13 @@ python3 ios/package_game.py "$BUILD" "$GAME_ZIP" "$OUTPUT_IPA" "$WORK" \
   --receipt "$PRIVATE/SteamOwnership.plist"
 ```
 
-For **Join Private Server**, also pass `--lan-root "$LAN_BUILD"`. Under each of `mps/` and `zms/`, provide the LAN-capable mode framework and its `pluto_pe_sections.bin`. The launcher checks the server's challenge response, protocol, session mode and active-match flag. On a Multiplayer direct join it uses the server's advertised menu IDs to request a team and assault class.
+For **Join Private Server**, also pass `--lan-root "$LAN_BUILD"`. Under each of `mps/` and `zms/`, provide the LAN-capable mode framework and its `pluto_pe_sections.bin`. The launcher checks the server's challenge response, protocol, session mode and active-match flag. Choose your Multiplayer team and class in the game's menus. Use the D-pad and Jump/A to confirm, or set **Pad: Off** to tap the menu.
+
+## Steam account
+
+Choose **Sign in to Steam** in the launcher for account/password or QR sign-in with Steam Guard. The app stores the resulting session in its own device-local Keychain entry. Open **Steam account** to sign out. This integration currently covers account sign-in. Steam library downloads, cloud saves and authenticated game matchmaking still require their game-session integrations and testing.
+
+**Install or verify game files** opens the existing private library installer, which uses its own Steam OpenID authorization. The native sign-in module is adapted from iDeck at revision `2ac39beff91251d36f3ad6331d3f8402b3c10e18`. Its sources, GPL-3.0-or-later license, exception and attribution are in `ios/SteamAuth/`; built apps include the notices in `SteamAuthNotices`.
 
 ## Host a private match
 
