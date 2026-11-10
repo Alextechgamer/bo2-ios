@@ -1,0 +1,15 @@
+*
+!/.gitignore
+!/README.md
+!/ios/
+!/ios/FullGame.m
+!/ios/GameSurface.mm
+!/ios/PlutoniumLAN.cpp
+!/ios/SteamInstaller.h
+!/ios/TouchControls.h
+!/ios/assemble_full.py
+!/ios/build_shader_library.py
+!/ios/index_library.py
+!/ios/package_game.py
+!/ios/steam_install_server.py
+!/ios/steam_receipt.py
