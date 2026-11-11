@@ -142,6 +142,7 @@ static NSURL *GameDirectory(NSError **error) {
     SteamInstaller *_installer;
     UIButton *_steamAccount;
     BO2SteamLaunch *_steamLaunch;
+    BOOL _onlineRequested;
     BOOL _started;
     BOOL _checking;
     NSString *_server;
@@ -318,6 +319,18 @@ static NSURL *GameDirectory(NSError **error) {
 - (void)choose:(UIButton *)sender {
     if (_checking) return;
     _server=nil;
+    if ([sender.accessibilityIdentifier isEqualToString:@"mps"]) {
+        UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Multiplayer" message:nil preferredStyle:UIAlertControllerStyleAlert];
+        [menu addAction:[UIAlertAction actionWithTitle:@"Play Online with Steam" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [self startSteam:@"mps" online:YES];
+        }]];
+        [menu addAction:[UIAlertAction actionWithTitle:@"Play Local" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            [self start:@"mps"];
+        }]];
+        [menu addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:menu animated:YES completion:nil];
+        return;
+    }
     [self start:sender.accessibilityIdentifier];
 }
 - (void)steamInstall {
@@ -356,6 +369,9 @@ static NSURL *GameDirectory(NSError **error) {
     _steamLaunch = nil;
 }
 - (void)startSteam:(NSString *)mode {
+    [self startSteam:mode online:NO];
+}
+- (void)startSteam:(NSString *)mode online:(BOOL)online {
     if (_installer || _started || _checking || !Modes()[mode]) return;
     NSError *error = nil;
     NSURL *assets = GameDirectory(&error);
@@ -374,6 +390,7 @@ static NSURL *GameDirectory(NSError **error) {
                 return;
             }
             self->_steamLaunch = launch;
+            self->_onlineRequested = online;
             [self start:mode];
             if (!self->_started) [self finishSteamLaunch];
         }];
@@ -403,9 +420,11 @@ static NSURL *GameDirectory(NSError **error) {
         return;
     }
     if (_steamLaunch) NSLog(@"[steam-runtime] provider installed before guest entry");
+    BOOL fixture=NO, official=_onlineRequested && [mode isEqualToString:@"mps"];
 #if TARGET_OS_SIMULATOR
-    BOOL fixture=[NSProcessInfo.processInfo.arguments containsObject:@"-BO2TransportFixturePort"];
-    BOOL official=[mode isEqualToString:@"mps"] && [NSProcessInfo.processInfo.arguments containsObject:@"-BO2ProbeOfficialMP"];
+    fixture=[NSProcessInfo.processInfo.arguments containsObject:@"-BO2TransportFixturePort"];
+    official |= [mode isEqualToString:@"mps"] && [NSProcessInfo.processInfo.arguments containsObject:@"-BO2ProbeOfficialMP"];
+#endif
     if (_steamLaunch && (fixture || official)) {
         bool (*enableAccount)(void)=dlsym(handle,"bo2_dw_enable_account_transport");
         if (!enableAccount || !enableAccount()) {
@@ -421,7 +440,6 @@ static NSURL *GameDirectory(NSError **error) {
         }
         if (setenv("BO2_DW_TRANSPORT","online",1)) { _status.text=@"Could not select game networking."; return; }
     }
-#endif
     if (_server) {
         bool (*transport)(const char*,uint16_t,bool)=dlsym(handle,"bo2_pluto_start");
         void (*queue)(const char*)=dlsym(handle,"bo2_cmd_queue");
