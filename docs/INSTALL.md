@@ -68,7 +68,7 @@ On one Apple silicon Mac mini with Xcode 26, November 11, 2026:
 
 - The tools were bo2-mac's app at `218dc80`, the same commit the setup pins the source to. The finished build folder was about 10 GB; the peak during the build was not measured.
 
-Not checked: the Steam download itself (no manifest or file has been fetched with it yet; the download code is iDeck's, adapted to this app's folders), Zombies online with Steam, an online session or a private-server join with frameworks linked by the setup, the Hksc download and build in `deps` (the link used a copy built earlier from the same commit), the signed (`TEAM`) and `GAME_ZIP` paths of the packager since they were changed, a full run for all three modes from nothing, a run on a second Mac, the unsigned IPA after SideStore or a signing service has signed it, and the result on a phone.
+Not checked: the Steam download itself (no manifest or file has been fetched with it yet; the download code is iDeck's, adapted to this app's folders, and iDeck's offline test of it has not been ported), Zombies online with Steam, an online session or a private-server join with frameworks linked by the setup, the Hksc download and build in `deps` (the link used a copy built earlier from the same commit), the signed (`TEAM`) and `GAME_ZIP` paths of the packager since they were changed, a full run for all three modes from nothing, a run on a second Mac, the unsigned IPA after SideStore or a signing service has signed it, and the result on a phone.
 
 Installing over an existing copy keeps its game data and saves. Deleting the app removes them.
 
@@ -86,11 +86,11 @@ Installing over an existing copy keeps its game data and saves. Deleting the app
 If the app was built without `GAME_ZIP`, it has no game files yet.
 
 1. Sign in to Steam (above).
-2. Tap **Game Files**. The app asks Steam for the Campaign, Multiplayer and Zombies files your account owns and downloads them from Steam's content servers into its own storage: about 16 GB, English only. The line under the cards shows the mode, the percentage and the speed.
+2. Tap **Game Files**. The app asks Steam for the Campaign, Multiplayer and Zombies files your account owns and downloads them from Steam's content servers into its own storage: the base game in English, without DLC. Allow well over 10 GB; the size has not been measured. The line under the cards shows the mode, the percentage and the speed.
 3. Keep the app open and the phone on Wi-Fi and power. Tapping **Game Files** again pauses; so does leaving the app. Tap it once more to carry on: finished parts are kept and checked, not downloaded again.
 4. When it says **Game files installed**, pick a mode.
 
-Steam only hands the files to an account that owns the game. Nothing is downloaded from anywhere else, and the files are stored as Steam delivers them. Tapping **Game Files** on an app that already has downloaded files checks them against Steam and repairs any part that differs.
+Steam only hands the files to an account that owns the game. Nothing is downloaded from anywhere else, and the files are stored as Steam delivers them. Tapping **Game Files** on an app that already has downloaded files asks first, then checks them against Steam and replaces any file that differs.
 
 ## Controls
 

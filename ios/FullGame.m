@@ -469,6 +469,19 @@ static void EndRunLog(void) {
 }
 - (void)steamDownload {
     if(_installer || _started || _checking || BO2GameDownload.running) return;
+    // Installed files are checked in place and any that differ from Steam's are replaced, so ask first.
+    NSURL *support=[NSFileManager.defaultManager URLForDirectory:NSApplicationSupportDirectory inDomain:NSUserDomainMask
+                                              appropriateForURL:nil create:NO error:nil];
+    if(![[support URLByAppendingPathComponent:@"BO2GameFiles"] checkResourceIsReachableAndReturnError:nil]){ [self beginSteamDownload]; return; }
+    UIAlertController *ask=[UIAlertController alertControllerWithTitle:@"Check game files with Steam?"
+        message:@"Game files are already installed. Any file that differs from Steam's copy will be downloaded again and replaced."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Check and Repair" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){ [self beginSteamDownload]; }]];
+    [ask addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:ask animated:YES completion:nil];
+}
+- (void)beginSteamDownload {
+    if(_installer || _started || _checking || BO2GameDownload.running) return;
     __weak ModePicker *weakSelf=self;
     [BO2GameDownload startWithStatus:^(NSString *text,BOOL done){
         ModePicker *picker=weakSelf;

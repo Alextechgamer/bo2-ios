@@ -26,6 +26,7 @@
 !/ios/SteamServices/**/*.swift
 !/ios/SteamServices/Content/*.c
 !/ios/SteamServices/Content/*.h
+!/ios/SteamServices/Content/ZSTD-LICENSE
 !/ios/SwiftBridge.h
 !/ios/SteamRuntimeProvider.h
 !/ios/SteamRuntimeProvider.mm

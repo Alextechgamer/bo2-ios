@@ -111,6 +111,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         notices.mkdir()
         for name in ("COPYING","LICENSE-EXCEPTION.md","UPSTREAM.md"):
             shutil.copyfile(src/"SteamAuth"/name,notices/name)
+        shutil.copyfile(src/"SteamServices/Content/ZSTD-LICENSE",notices/"ZSTD-LICENSE")
         shutil.copyfile(receipt, app/"SteamOwnership.plist")
         frameworks=app/"Frameworks"
         frameworks.mkdir(exist_ok=True)
