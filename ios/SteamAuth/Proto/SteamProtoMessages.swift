@@ -650,22 +650,55 @@ struct CMsgClientLogonResponse {
     var clientSuppliedSteamID: UInt64 = 0
     var vanityURL: String = ""
     var cellID: UInt32 = 0
+    var publicIPv4: UInt32?
 
     static func deserialize(from data: Data) throws -> Self {
         var decoder = ProtobufDecoder(data)
         var msg = Self()
+        var legacyIP: UInt32?, modernIP: UInt32?
+        var modernIPSeen = false
 
         while let tag = try decoder.readTag() {
             switch tag.fieldNumber {
             case 1: msg.eresult = Int32(truncatingIfNeeded: try decoder.readVarint())       // eresult = 1
             case 3: msg.heartbeatSeconds = Int32(truncatingIfNeeded: try decoder.readVarint()) // heartbeat_seconds = 3
+            case 4:
+                guard tag.wireType == .varint else { throw SteamError.invalidMessage }
+                let value = try decoder.readVarint()
+                guard value <= UInt32.max else { throw SteamError.invalidMessage }
+                legacyIP = value == 0 ? nil : UInt32(value)
             case 7: msg.cellID = UInt32(truncatingIfNeeded: try decoder.readVarint())                           // cell_id = 7
             case 14: msg.vanityURL = try decoder.readString()                               // vanity_url = 14
+            case 15:
+                guard tag.wireType == .lengthDelimited else { throw SteamError.invalidMessage }
+                modernIPSeen = true
+                modernIP = try decodeIPv4(decoder.readBytes())
             case 20: msg.clientSuppliedSteamID = try decoder.readFixed64()                  // client_supplied_steamid = 20
             default: try decoder.skip(wireType: tag.wireType)
             }
         }
+        msg.publicIPv4 = modernIPSeen ? modernIP : legacyIP
         return msg
+    }
+
+    private static func decodeIPv4(_ data: Data) throws -> UInt32? {
+        guard data.count <= 64 else { throw SteamError.invalidMessage }
+        var decoder = ProtobufDecoder(data), ipv4: UInt32?
+        while let tag = try decoder.readTag() {
+            switch tag.fieldNumber {
+            case 1:
+                guard tag.wireType == .fixed32 else { throw SteamError.invalidMessage }
+                let value = try decoder.readFixed32()
+                ipv4 = value == 0 ? nil : value
+            case 2:
+                guard tag.wireType == .lengthDelimited, try decoder.readBytes().count == 16 else {
+                    throw SteamError.invalidMessage
+                }
+                ipv4 = nil // oneof: an IPv6 address is never a fabricated IPv4 address.
+            default: try decoder.skip(wireType: tag.wireType)
+            }
+        }
+        return ipv4
     }
 }
 

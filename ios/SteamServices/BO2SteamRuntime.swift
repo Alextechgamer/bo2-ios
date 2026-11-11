@@ -182,10 +182,21 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
     private var identitySubscription: AnyCancellable?
     private var securitySubscription: AnyCancellable?
     private var bannedApps: Set<UInt32>?
+    private let gameServer: SteamGameServerService?
+    private var serverSubscription: AnyCancellable?
+    private var serverConfiguration: SteamGameServerService.Configuration?
+    private var serverGeneration: UInt64 = 0
+    private var serviceGeneration: UInt64 = 0
+    private var serverRequested = false
+    private var serverID: UInt64 = 0
+    private var serverLoggedOn = false
+    private var serverSecure: Int32 = -1
+    private var serverPublicIP: UInt32 = 0
+    private var serverEvents: [BO2SteamServerEvent] = []
 
     @MainActor
     init(services: BO2SteamServices, steamID: UInt64, appID: UInt32,
-         ownedApps: Set<UInt32>, installedDLC: Set<UInt32>) throws {
+         ownedApps: Set<UInt32>, installedDLC: Set<UInt32>, gameServer: SteamGameServerService? = nil) throws {
         guard steamID != 0, services.session.steamID == steamID,
               services.authenticatedSteamID == steamID, ownedApps.contains(appID) else {
             throw SteamFileError.invalid("A verified Steam account and game license are required.")
@@ -200,6 +211,7 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
         self.owned = ownedApps
         self.installed = installedDLC.intersection(ownedApps)
         self.bannedApps = Set(banned)
+        self.gameServer = gameServer ?? ([UInt32(202990),212910].contains(appID) ? SteamGameServerService(appID: appID) : nil)
         identitySubscription = services.$authenticatedSteamID.sink { [weak self] current in
             guard let self, current != account else { return }
             close()
@@ -210,6 +222,28 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
             bannedApps = apps.map { Set($0) }
             lock.unlock()
             if apps == nil || apps!.contains(appID) { close() }
+        }
+        serverSubscription = self.gameServer?.$snapshot.sink { [weak self] snapshot in
+            guard let self else { return }
+            lock.lock(); defer { lock.unlock() }
+            guard currentLocked(), serverRequested, serviceGeneration == serverGeneration else { return }
+            serverID = snapshot.steamID
+            serverLoggedOn = snapshot.loggedOn
+            serverSecure = snapshot.secure.map { $0 ? 1 : 0 } ?? -1
+            serverPublicIP = snapshot.publicIPv4
+        }
+        self.gameServer?.eventsDidChange = { [weak self] in
+            guard let self, let gameServer = self.gameServer else { return }
+            let events = gameServer.drainEvents()
+            lock.lock(); defer { lock.unlock() }
+            guard currentLocked(), serverRequested, serviceGeneration == serverGeneration else { return }
+            for event in events {
+                if serverEvents.count >= 128 { serverEvents.removeFirst() }
+                var copy = BO2SteamServerEvent()
+                copy.callbackID = event.callbackID; copy.result = event.result
+                copy.secure = event.secure == true ? 1 : 0
+                serverEvents.append(copy)
+            }
         }
     }
 
@@ -225,6 +259,83 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
         guard SteamSignIn.revision == revision else { return -1 }
         if bannedApps?.contains(app) == true { return 1 }
         return valid && bannedApps != nil ? 0 : -1
+    }
+
+    func initializeServer(_ config: BO2SteamServerConfig, version: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard currentLocked(), gameServer != nil, serverConfiguration == nil,
+              config.serverMode == 3, config.gamePort != 0, !version.isEmpty else { return false }
+        serverGeneration &+= 1
+        serverRequested = false
+        serverConfiguration = SteamGameServerService.Configuration(ip: config.ip, steamPort: config.steamPort,
+            gamePort: config.gamePort, queryPort: config.queryPort, serverMode: config.serverMode,
+            version: version, dedicated: false, gameDirectory: "")
+        return true
+    }
+
+    func setDedicatedServer(_ dedicated: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard currentLocked(), !serverRequested else { return }
+        serverConfiguration?.dedicated = dedicated
+    }
+
+    private func currentServer(_ epoch: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return currentLocked() && serverGeneration == epoch
+    }
+
+    private func activateServer(_ epoch: UInt64) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard currentLocked(), serverGeneration == epoch else { return false }
+        serviceGeneration = epoch
+        return true
+    }
+
+    func logOnAnonymous() {
+        lock.lock()
+        guard currentLocked(), let config = serverConfiguration, let gameServer, !serverRequested else {
+            lock.unlock(); return
+        }
+        serverRequested = true
+        let epoch = serverGeneration
+        lock.unlock()
+        Task { @MainActor [self] in
+            guard currentServer(epoch) else { return }
+            // Every new server generation waits for the old connection to close.
+            await gameServer.stop()
+            guard activateServer(epoch) else { return }
+            do { try await gameServer.start(config) }
+            catch { /* The service preserves failure/disconnect events. */ }
+        }
+    }
+
+    func serverSnapshot() -> (id: UInt64, loggedOn: Bool, secure: Int32, publicIP: UInt32) {
+        lock.lock(); defer { lock.unlock() }
+        guard currentLocked() else { return (0,false,-1,0) }
+        return (serverID,serverLoggedOn,serverSecure,serverPublicIP)
+    }
+
+    func pollServerEvent(_ event: UnsafeMutablePointer<BO2SteamServerEvent>?) -> Int32 {
+        guard let event else { return -1 }
+        lock.lock(); defer { lock.unlock() }
+        guard currentLocked() else { return -1 }
+        guard !serverEvents.isEmpty else { return 0 }
+        event.pointee = serverEvents.removeFirst()
+        return 1
+    }
+
+    func shutdownServer() {
+        lock.lock()
+        serverGeneration &+= 1
+        let epoch = serverGeneration
+        serverConfiguration = nil; serverRequested = false
+        serverID = 0; serverLoggedOn = false; serverSecure = -1; serverPublicIP = 0
+        serverEvents.removeAll()
+        lock.unlock()
+        Task { @MainActor [self] in
+            guard currentServer(epoch) else { return }
+            await gameServer?.stop()
+        }
     }
 
     func requestTicket(_ data: Data) -> UInt64 {
@@ -306,11 +417,16 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
         lock.lock()
         guard valid else { lock.unlock(); return }
         valid = false
+        serverGeneration &+= 1
+        serverConfiguration = nil; serverRequested = false
+        serverID = 0; serverLoggedOn = false; serverSecure = -1; serverPublicIP = 0
+        serverEvents.removeAll()
         tickets = tickets.mapValues { _ in .finished(nil, 3) }
         let cancelled = Array(tasks.values)
         tasks.removeAll()
         lock.unlock()
         for task in cancelled { task.cancel() }
+        Task { @MainActor [gameServer] in await gameServer?.stop() }
     }
 
     func makeProvider() -> BO2SteamProviderV1 {
@@ -326,6 +442,17 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
         provider.pollEncryptedTicket = bo2_launcher_poll_ticket
         provider.releaseTicket = bo2_launcher_release_ticket
         provider.vacStatus = bo2_launcher_vac_status
+        if gameServer != nil {
+            provider.initGameServer = bo2_launcher_server_init
+            provider.setDedicatedServer = bo2_launcher_server_dedicated
+            provider.logOnAnonymous = bo2_launcher_server_logon
+            provider.gameServerSteamID = bo2_launcher_server_id
+            provider.gameServerLoggedOn = bo2_launcher_server_logged_on
+            provider.gameServerSecure = bo2_launcher_server_secure
+            provider.pollGameServerEvent = bo2_launcher_server_event
+            provider.shutdownGameServer = bo2_launcher_server_shutdown
+            provider.gameServerPublicIP = bo2_launcher_server_public_ip
+        }
         return provider
     }
 }
@@ -359,3 +486,29 @@ func bo2_launcher_poll_ticket(_ context: UnsafeMutableRawPointer?, _ handle: UIn
 }
 @_cdecl("bo2_launcher_release_ticket")
 func bo2_launcher_release_ticket(_ context: UnsafeMutableRawPointer?, _ handle: UInt64) { steamRuntime(context)?.releaseTicket(handle) }
+
+@_cdecl("bo2_launcher_server_init")
+func bo2_launcher_server_init(_ context: UnsafeMutableRawPointer?, _ configuration: UnsafePointer<BO2SteamServerConfig>?) -> Bool {
+    guard let runtime = steamRuntime(context), let configuration else { return false }
+    let config = configuration.pointee
+    guard config.versionSize > 0, config.versionSize <= 128, let bytes = config.version,
+          let version = String(data: Data(bytes: bytes, count: Int(config.versionSize)), encoding: .utf8),
+          !version.contains("\0") else { return false }
+    return runtime.initializeServer(config, version: version)
+}
+@_cdecl("bo2_launcher_server_dedicated")
+func bo2_launcher_server_dedicated(_ context: UnsafeMutableRawPointer?, _ dedicated: Bool) { steamRuntime(context)?.setDedicatedServer(dedicated) }
+@_cdecl("bo2_launcher_server_logon")
+func bo2_launcher_server_logon(_ context: UnsafeMutableRawPointer?) { steamRuntime(context)?.logOnAnonymous() }
+@_cdecl("bo2_launcher_server_id")
+func bo2_launcher_server_id(_ context: UnsafeMutableRawPointer?) -> UInt64 { steamRuntime(context)?.serverSnapshot().id ?? 0 }
+@_cdecl("bo2_launcher_server_logged_on")
+func bo2_launcher_server_logged_on(_ context: UnsafeMutableRawPointer?) -> Bool { steamRuntime(context)?.serverSnapshot().loggedOn ?? false }
+@_cdecl("bo2_launcher_server_secure")
+func bo2_launcher_server_secure(_ context: UnsafeMutableRawPointer?) -> Int32 { steamRuntime(context)?.serverSnapshot().secure ?? -1 }
+@_cdecl("bo2_launcher_server_event")
+func bo2_launcher_server_event(_ context: UnsafeMutableRawPointer?, _ event: UnsafeMutablePointer<BO2SteamServerEvent>?) -> Int32 { steamRuntime(context)?.pollServerEvent(event) ?? -1 }
+@_cdecl("bo2_launcher_server_shutdown")
+func bo2_launcher_server_shutdown(_ context: UnsafeMutableRawPointer?) { steamRuntime(context)?.shutdownServer() }
+@_cdecl("bo2_launcher_server_public_ip")
+func bo2_launcher_server_public_ip(_ context: UnsafeMutableRawPointer?) -> UInt32 { steamRuntime(context)?.serverSnapshot().publicIP ?? 0 }

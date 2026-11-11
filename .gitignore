@@ -20,6 +20,7 @@
 !/ios/SteamRuntimeProvider.h
 !/ios/SteamRuntimeProvider.mm
 !/ios/SteamRuntimeCalls.h
+!/ios/SteamGuestCallbacks.h
 !/ios/TouchControls.h
 !/ios/assemble_full.py
 !/ios/build_shader_library.py

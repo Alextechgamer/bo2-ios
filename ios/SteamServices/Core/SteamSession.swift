@@ -28,9 +28,11 @@ class SteamSession {
         didSet { vacStatusDidChange?(vacBannedApps) }
     }
     var vacStatusDidChange: (@MainActor ([UInt32]?) -> Void)?
+    private(set) var unsupportedIntegrityMessage: UInt32?
     private(set) var accountName: String = ""
     private(set) var personaName: String = ""
     private(set) var cellID: UInt32 = 0
+    private(set) var publicIPv4: UInt32?
     /// While true the session neither connects nor reconnects: a game session
     /// runs, and Valve's own client must be the only one logged on with this
     /// account (see `suspend()`).
@@ -99,6 +101,11 @@ class SteamSession {
         }
     }
 
+    var anonymousGameServerAppID: UInt32? {
+        if case .anonymousGameServer(let appID) = authentication { return appID }
+        return nil
+    }
+
     // MARK: - Lifecycle
 
     func acquireRuntimeLease() throws -> UUID {
@@ -138,6 +145,7 @@ class SteamSession {
     }
 
     private func establishConnection(epoch: UInt64) async throws {
+        unsupportedIntegrityMessage = nil
         guard logonCredentials() != nil else { throw SteamError.invalidCredentials }
         if case .anonymousGameServer(let appID) = authentication,
            ![UInt32(202990),212910].contains(appID) { throw SteamError.invalidMessage }
@@ -426,6 +434,7 @@ class SteamSession {
                 let eResultCode: UInt32
                 let heartbeatSecs: Int32
                 let outCellID: UInt32
+                let outPublicIPv4: UInt32?
 
                 if message.isProtobuf {
                     // The same EMsg 751 supports protobuf and legacy bodies.
@@ -434,6 +443,7 @@ class SteamSession {
                         eResultCode = UInt32(logonResponse.eresult)
                         heartbeatSecs = logonResponse.heartbeatSeconds > 0 ? logonResponse.heartbeatSeconds : 30
                         outCellID = logonResponse.cellID
+                        outPublicIPv4 = logonResponse.publicIPv4
                     } catch {
                         resumeThrowing(error)
                         return
@@ -449,6 +459,10 @@ class SteamSession {
                     }
                     heartbeatSecs = 30
                     outCellID = 0
+                    outPublicIPv4 = message.body.count >= 24 ? message.body.withUnsafeBytes {
+                        let ip = UInt32(littleEndian: $0.loadUnaligned(fromByteOffset: 20, as: UInt32.self))
+                        return ip == 0 ? nil : ip
+                    } : nil
                 }
 
                 SteamLog.trace("ClientLogonResponse: eresult=\(eResultCode)")
@@ -497,6 +511,7 @@ class SteamSession {
                 self.sessionID = message.header.clientSessionid
                 self.heartbeatInterval = heartbeatSecs
                 self.cellID = outCellID
+                self.publicIPv4 = outPublicIPv4
                 self.connectionState = .authenticated
                 self.reconnectAttempts = 0
                 SteamLog.trace("Authenticated")
@@ -586,6 +601,7 @@ class SteamSession {
         accountName = ""
         personaName = ""
         cellID = 0
+        publicIPv4 = nil
         sessionID = 0
         SteamLog.trace("Session disconnected")
     }
@@ -869,6 +885,12 @@ class SteamSession {
 
     private func handleUnsolicitedMessage(_ message: SteamMessageCodec.IncomingMessage) {
         switch message.rawEMsg {
+        case EMsg.clientServiceModule.rawValue, EMsg.clientServiceCall.rawValue:
+            // This runtime cannot execute Steam's client-integrity modules.
+            // Preserve the stage and stop; never synthesize their result.
+            unsupportedIntegrityMessage = message.rawEMsg
+            SteamLog.event("[steam-security] unsupported integrity service emsg=\(message.rawEMsg)")
+            disconnect()
         case EMsg.clientLoggedOff.rawValue:
             SteamLog.trace("Received ClientLoggedOff")
             // An explicit server logoff is not a transient transport outage.
