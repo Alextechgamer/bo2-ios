@@ -32,6 +32,7 @@
 !/ios/TouchOverlay.m
 !/ios/assemble_full.py
 !/ios/build_shader_library.py
+!/ios/fold_modes.sh
 !/ios/index_library.py
 !/ios/package_game.py
 !/ios/runtime_catalog.py

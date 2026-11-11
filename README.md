@@ -184,6 +184,7 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 | [ios/SteamAuth/](ios/SteamAuth/) | Steam sign-in (password, QR, Steam Guard, Keychain), adapted from iDeck |
 | [ios/SteamServices/](ios/SteamServices/) | Shared Steam session, library, tickets, game-server session, save folders |
 | [ios/SteamRuntimeProvider.mm](ios/SteamRuntimeProvider.mm) | The provider table the game's Steam interface reads |
+| [ios/fold_modes.sh](ios/fold_modes.sh) | Recompiles a mode's translated code with the memory and flag helpers folded in, at `-O2` |
 | [ios/package_game.py](ios/package_game.py) | Builds and signs a personal IPA |
 | [lan/](lan/) | Private-server hosting, Mac relay, USB fallback, match verifiers |
 | [docs/](docs/) | [Install and play](docs/INSTALL.md), [private servers](docs/PRIVATE-SERVERS.md) |
