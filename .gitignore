@@ -1,9 +1,13 @@
 *
 !/.gitignore
 !/README.md
+!/LICENSE
+!/THIRD-PARTY-NOTICES.md
 !/docs/
 !/docs/INSTALL.md
 !/docs/PRIVATE-SERVERS.md
+!/docs/assets/
+!/docs/assets/*.jpg
 !/ios/
 !/ios/FullGame.m
 !/ios/GameSurface.mm

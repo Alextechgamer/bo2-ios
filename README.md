@@ -13,12 +13,16 @@ The statically recompiled game from [bo2-mac](https://github.com/adrbn/bo2-mac),
 ![Steam: native sign-in](https://img.shields.io/badge/Steam-native%20sign--in-ff6a00?style=flat-square&labelColor=0b0b0c)
 ![JIT: none](https://img.shields.io/badge/JIT-none-ff6a00?style=flat-square&labelColor=0b0b0c)
 ![game files in this repository: none](https://img.shields.io/badge/game%20files-none-f4f1ea?style=flat-square&labelColor=0b0b0c)
+![licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-f4f1ea?style=flat-square&labelColor=0b0b0c)
 ![status: experimental](https://img.shields.io/badge/status-experimental-f4f1ea?style=flat-square&labelColor=0b0b0c)
 
 <sub>[Abstract](#abstract) · [Controls](#controls) · [Repository](#repository) · [Legal](#legal)</sub><br>
 <sub>Experimental, 2026-11-10 · tried on one iPhone 17 Pro Max and the iOS 26 simulator</sub>
 
 </div>
+
+<p align="center"><img src="docs/assets/multiplayer.jpg" alt="Multiplayer on Aftermath with the HUD and the on-screen controls: move area on the left, FIRE, ADS, JUMP and the other pads on the right" width="640"><br>
+<sub>Multiplayer with the current touch controls. iOS simulator, Aftermath, on a private server.</sub></p>
 
 > [!IMPORTANT]
 > **This repository contains no game file and no translated game code.** It holds the launcher, the iOS glue and the
@@ -45,7 +49,16 @@ ARM64 code.
 
 ## Results
 
-Everything below was observed once or a few times on the hardware named. Nothing here is a benchmark.
+Everything below was observed once or a few times on the hardware named.
+
+| | measured | conditions |
+|---|---|---|
+| Local multiplayer on an iPhone 17 Pro Max | **57–62 fps** (median 62) | one local match on Hijacked, about 26,700 frames; frames the game submitted, read from the app's own log |
+| Online multiplayer on the same phone | **median 32 fps** (27–43 on screen) | one public match on Raid, while screen recording |
+| Zombies on the same phone | **median 18 fps**, dips below 10 | Town from round 20, while screen recording. An earlier build ran the same match near 60, so this is a regression under investigation |
+| iOS simulator on a Mac | 54–60 fps | the readout in the current screenshots on this page, in a private Zombies and a private Multiplayer match |
+
+The phone figure counts frames the game hands to Metal. Frames actually shown on screen have not been measured yet.
 
 | | observed | where |
 |---|---|---|
@@ -55,6 +68,18 @@ Everything below was observed once or a few times on the hardware named. Nothing
 | Private Zombies | TranZit on a LAN-mode server: active play with advancing snapshots | simulator, and iPhone over USB |
 | Sound and player name | game audio plays; the in-game name is the Steam display name | iPhone |
 | Touch controls | move stick, swipe look, pad buttons | iPhone, multiplayer only so far |
+| Game files in this repository | none: 60-odd source and text files, the largest under 50 KB, in the tree and in its history | checked with the scan in [Legal](#legal) |
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/launcher.jpg" alt="The launcher: Campaign, Multiplayer and Zombies cards, with a Steam chip that reads Signed in" width="100%"><br><sub>The launcher, signed in to Steam.</sub></td>
+<td width="50%"><img src="docs/assets/zombies.jpg" alt="Zombies on TranZit, round 1, with the HUD and touch controls" width="100%"><br><sub>Zombies, TranZit, round 1, on a private server.</sub></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/assets/multiplayer-online.jpg" alt="A public multiplayer match on Express, on an iPhone, with the touch controls" width="100%"><br><sub>A public match on an iPhone 17 Pro Max, joined with the stock client and the player's own Steam account. Other players' names are blurred. The readout shows 28 fps at this moment; see Results for the whole match.</sub></td>
+<td width="50%" valign="top"><sub>The public-match picture is from the phone; the others are iOS simulator captures. The frame rate and memory readout in the top right corner is the app's own.</sub></td>
+</tr>
+</table>
 
 **What you can play**
 
@@ -142,6 +167,8 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
   sockets do not.
 - **Two save locations.** Local modes and Steam sessions keep saves in different folders.
 - **Private servers over Wi-Fi timed out on the tested phone.** The USB path through a Mac works.
+- **Local play is being worked on.** Campaign, local Multiplayer and solo Zombies start, but have had far less
+  attention than online play. Coming soon.
 - **Not yet tried:** Campaign and Zombies with the new touch controls, official Zombies, progress after a finished
   public match, any iPhone other than the one named above.
 - **Free Apple IDs** sign an app for 7 days.
@@ -160,6 +187,7 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 | [ios/package_game.py](ios/package_game.py) | Builds and signs a personal IPA |
 | [lan/](lan/) | Private-server hosting, Mac relay, USB fallback, match verifiers |
 | [docs/](docs/) | [Install and play](docs/INSTALL.md), [private servers](docs/PRIVATE-SERVERS.md) |
+| [LICENSE](LICENSE), [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | GPL-3.0-or-later, and what this builds on |
 
 The Git allowlist covers only these sources. Keep account receipts, signing material, server addresses, private
 libraries, compiled frameworks, archives and device reports outside the repository.
@@ -182,9 +210,11 @@ For a copy the user owns, on hardware the user owns.
   their own Steam copy of Call of Duty: Black Ops II.
 - Steam sign-in uses the player's own account. Tickets are requested from Steam and passed on unchanged. No ticket,
   ownership answer or anti-cheat reply is fabricated.
-- The Steam sign-in module is adapted from iDeck and is GPL-3.0-or-later, with its exception and notices in
-  [ios/SteamAuth/](ios/SteamAuth/); built apps carry the notices in `SteamAuthNotices`. The translated runtime
-  comes from bo2-mac, which is GPL-3.0.
+- The code written here is licensed under GPL-3.0-or-later ([LICENSE](LICENSE)). The Steam modules are adapted from
+  iDeck under the same licence with its exception; the runtime that a built app links comes from bo2-mac (GPL-3.0).
+  Every borrowed work, where it is used and its terms are in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+- The repository was scanned for game data on 2026-11-10: no binary file other than the screenshots in `docs/assets`, no file
+  with a game extension, and no path outside the source allowlist, in the tree or in its history.
 
 This is an unofficial fan project. Call of Duty and Black Ops are trademarks of Activision Publishing, Inc. Steam is
 a trademark of Valve Corporation. iPhone and iOS are trademarks of Apple Inc. This project is not affiliated with,

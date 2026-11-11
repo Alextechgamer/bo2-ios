@@ -216,7 +216,22 @@ static void BeginRunLog(void) {
     NSURL *log = RunFile(@"last-run.log"), *previous = RunFile(@"previous-run.log");
     [files removeItemAtURL:previous error:nil];
     [files moveItemAtURL:log toURL:previous error:nil];
-    if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+    if (!freopen(log.fileSystemRepresentation, "w", stderr)) return;
+    // The game logs a great deal while loading. Buffer it and flush once a second,
+    // so the file costs one write a second and a crash loses at most that second.
+    setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+    static dispatch_source_t flusher;
+    flusher = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(flusher, DISPATCH_TIME_NOW, NSEC_PER_SEC, NSEC_PER_SEC / 4);
+    dispatch_source_set_event_handler(flusher, ^{ fflush(stderr); });
+    dispatch_resume(flusher);
+}
+// Heat and Low Power Mode both slow the phone down. Record them with the frame
+// rates so a slow session can be told apart from a slow build.
+static void LogDeviceState(void) {
+    NSProcessInfo *info = NSProcessInfo.processInfo;
+    fprintf(stderr, "[device] thermal=%ld lowPower=%d recording=%d\n", (long)info.thermalState,
+            info.lowPowerModeEnabled, UIScreen.mainScreen.isCaptured);
 }
 static void EndRunLog(void) {
     fflush(stderr);
@@ -567,6 +582,11 @@ static void EndRunLog(void) {
     if (_steamLaunch.personaName.length) setenv("BO2_NAME",_steamLaunch.personaName.UTF8String,1);
     if (_steamLaunch) setenv("BO2_DW_TRACE","0",1);   // keep network payloads out of the saved log
     BeginRunLog();
+    LogDeviceState();
+    for (NSNotificationName name in @[NSProcessInfoThermalStateDidChangeNotification,
+            NSProcessInfoPowerStateDidChangeNotification, UIScreenCapturedDidChangeNotification])
+        [NSNotificationCenter.defaultCenter addObserverForName:name object:nil queue:NSOperationQueue.mainQueue
+            usingBlock:^(NSNotification *note) { LogDeviceState(); }];
     UIView *surface = makeSurface(self.view.bounds);
     [self.view addSubview:surface];
     // The launcher supplies the touch controls. Frameworks built before that

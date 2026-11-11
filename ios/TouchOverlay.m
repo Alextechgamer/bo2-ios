@@ -35,7 +35,10 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     void (*_cursorRead)(double *, double *);
     void (*_cursorSet)(double, double);
     uint8_t **_arena;
-    uint32_t _stateAddress, _clientState;
+    uint32_t _stateAddress, _mapAddress, _clientState;
+    char _map[32];
+    unsigned _frame;
+    BOOL _inMatch;
     NSMutableArray<UILabel *> *_pads;
     NSMutableDictionary<NSString *, NSArray<NSNumber *> *> *_layout;   // title -> x, y (fractions of the safe area), size
     UIView *_stickBase, *_stickKnob, *_panel, *_editBar;
@@ -59,8 +62,12 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     _cursorSet = dlsym(handle, "ios_cursor_set");
     _arena = dlsym(handle, "bo2_g_base");
     if (!_pad || !_cursorRead || !_cursorSet) return nil;
-    // Client connection state in guest memory: 10 while the player is in a match.
-    _stateAddress = [mode isEqualToString:@"mps"] ? 0x10e9d88 : [mode isEqualToString:@"zms"] ? 0x10e7e18 : 0;
+    // Guest memory the automatic switch reads. The client connection state is 10
+    // while a map is running, which includes the menu map of online play. The
+    // "mapname" variable names that map; its text pointer sits 0x18 into the record.
+    BOOL mp = [mode isEqualToString:@"mps"], zm = [mode isEqualToString:@"zms"];
+    _stateAddress = mp ? 0x10e9d88 : zm ? 0x10e7e18 : 0;
+    _mapAddress = mp ? 0x281d750 : zm ? 0x281b7d0 : 0x2b962e4;
     self.multipleTouchEnabled = YES;
     _selected = NSNotFound;
     _roles = [NSMapTable strongToStrongObjectsMapTable];
@@ -450,12 +457,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
 }
 - (void)tick:(CADisplayLink *)link {
     // Show the controls when a match starts and give the pointer back when it ends.
-    if (_stateAddress && _arena && *_arena) {
-        uint32_t state;
-        memcpy(&state, *_arena + _stateAddress, sizeof(state));
-        if ((state == 10) != (_clientState == 10)) [self setPlay:state == 10];
-        _clientState = state;
-    }
+    if (++_frame % 6 == 0 && _arena && *_arena) [self followGame:*_arena];
     if (!_play || !_stickLook || _editing) return;
     // Stick look: about 18 points of travel per frame is a full deflection at speed 1.
     CGFloat scale = _sensitivity / 18.0;
@@ -471,6 +473,27 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
         _look = CGPointMake(_lookSmooth.x / length * out, _lookSmooth.y / length * out);
     }
     [self publish];
+}
+// A match is a running map that is not the menu map. Campaign has no known
+// state address, so its map name alone decides.
+- (void)followGame:(const uint8_t *)base {
+    uint32_t state = 10, record = 0, text = 0;
+    char map[sizeof(_map)] = {0};
+    if (_stateAddress) memcpy(&state, base + _stateAddress, sizeof(state));
+    memcpy(&record, base + _mapAddress, sizeof(record));
+    if (record >= 0x10000 && record < 0xfff00000) memcpy(&text, base + record + 0x18, sizeof(text));
+    if (text >= 0x10000 && text < 0xfff00000) memcpy(map, base + text, sizeof(map) - 1);
+    BOOL inMatch = state == 10 && map[0] && !strstr(map, "frontend");
+    if (state != _clientState || strcmp(map, _map)) {
+        // One line per change, for the saved run log.
+        fprintf(stderr, "[touch] state=%u map=%s match=%d\n", state, map, inMatch);
+        _clientState = state;
+        memcpy(_map, map, sizeof(_map));
+    }
+    if (inMatch != _inMatch) {
+        _inMatch = inMatch;
+        [self setPlay:inMatch];
+    }
 }
 - (void)resetInput {
     [_roles removeAllObjects];

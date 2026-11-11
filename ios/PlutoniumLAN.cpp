@@ -1,5 +1,6 @@
 // Private T6 r5369 LAN transport for the translated Multiplayer and Zombies clients.
 #include "win32_shim.h"
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -65,6 +66,8 @@ bool ready() {
     if(!nonblocking(fd)){close(fd);return false;}
     int yes=1;
     setsockopt(fd,SOL_SOCKET,SO_NOSIGPIPE,&yes,sizeof yes);
+    // Game packets are small and frequent. Send each at once.
+    setsockopt(fd,IPPROTO_TCP,TCP_NODELAY,&yes,sizeof yes);
     channel=fd;
     return true;
 }
