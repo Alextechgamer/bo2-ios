@@ -388,6 +388,7 @@ static NSURL *GameDirectory(NSError **error) {
     if (![sections checkResourceIsReachableAndReturnError:&error]) { _status.text = error.localizedDescription; return; }
     setenv("BO2_GAME_DIR",game.fileSystemRepresentation,1);
     ConfigureRuntime(mode);
+    if (setenv("BO2_DW_TRANSPORT","local",1)) { _status.text=@"Could not configure game networking."; return; }
     if (chdir(game.fileSystemRepresentation)) { _status.text=@"Could not open the game directory."; return; }
     NSURL *library = [NSBundle.mainBundle.privateFrameworksURL URLByAppendingPathComponent:
         [NSString stringWithFormat:@"%@.framework/%@",mode,mode]];
@@ -402,6 +403,25 @@ static NSURL *GameDirectory(NSError **error) {
         return;
     }
     if (_steamLaunch) NSLog(@"[steam-runtime] provider installed before guest entry");
+#if TARGET_OS_SIMULATOR
+    BOOL fixture=[NSProcessInfo.processInfo.arguments containsObject:@"-BO2TransportFixturePort"];
+    BOOL official=[mode isEqualToString:@"mps"] && [NSProcessInfo.processInfo.arguments containsObject:@"-BO2ProbeOfficialMP"];
+    if (_steamLaunch && (fixture || official)) {
+        bool (*enableAccount)(void)=dlsym(handle,"bo2_dw_enable_account_transport");
+        if (!enableAccount || !enableAccount()) {
+            _status.text=@"Game networking requires an active Steam session."; return;
+        }
+        if (fixture) {
+            NSInteger port=[NSUserDefaults.standardUserDefaults integerForKey:@"BO2TransportFixturePort"];
+            bool (*configureFixture)(uint16_t)=dlsym(handle,"bo2_dw_set_loopback_fixture");
+            if (port<1 || port>UINT16_MAX || !configureFixture || !configureFixture((uint16_t)port)) {
+                _status.text=@"Could not start the local networking test."; return;
+            }
+            NSLog(@"[steam-runtime] loopback fixture configured");
+        }
+        if (setenv("BO2_DW_TRANSPORT","online",1)) { _status.text=@"Could not select game networking."; return; }
+    }
+#endif
     if (_server) {
         bool (*transport)(const char*,uint16_t,bool)=dlsym(handle,"bo2_pluto_start");
         void (*queue)(const char*)=dlsym(handle,"bo2_cmd_queue");

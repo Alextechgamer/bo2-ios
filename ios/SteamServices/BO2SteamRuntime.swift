@@ -38,6 +38,10 @@ final class BO2SteamLaunch: NSObject {
         var provider = context.makeProvider()
         guard withUnsafePointer(to: &provider, { install($0) }) else { return false }
         BO2SteamRuntime.retainInstalledContext(context)
+        if let symbol = dlsym(handle, "bo2_dw_stop_account_transport") {
+            let stop = unsafeBitCast(symbol, to: (@convention(c) () -> Void).self)
+            guard context.bindTransportStop({ stop() }) else { stop(); return false }
+        }
         return true
     }
 
@@ -176,6 +180,7 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
     private let owned: Set<UInt32>
     private let installed: Set<UInt32>
     private var valid = true
+    private var transportStop: (() -> Void)?
     private var sequence: UInt64 = 0
     private var tickets: [UInt64: Ticket] = [:]
     private var tasks: [UInt64: Task<Void, Never>] = [:]
@@ -223,6 +228,7 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
             lock.unlock()
             if apps == nil || apps!.contains(appID) { close() }
         }
+        self.gameServer?.integrityStopped = { [weak self] in self?.close() }
         serverSubscription = self.gameServer?.$snapshot.sink { [weak self] snapshot in
             guard let self else { return }
             lock.lock(); defer { lock.unlock() }
@@ -413,10 +419,19 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
         task?.cancel()
     }
 
+    func bindTransportStop(_ stop: @escaping () -> Void) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard currentLocked(), transportStop == nil else { return false }
+        transportStop = stop
+        return true
+    }
+
     func close() {
         lock.lock()
         guard valid else { lock.unlock(); return }
         valid = false
+        let stop = transportStop
+        transportStop = nil
         serverGeneration &+= 1
         serverConfiguration = nil; serverRequested = false
         serverID = 0; serverLoggedOn = false; serverSecure = -1; serverPublicIP = 0
@@ -425,6 +440,7 @@ final class BO2SteamRuntimeContext: @unchecked Sendable {
         let cancelled = Array(tasks.values)
         tasks.removeAll()
         lock.unlock()
+        stop?()
         for task in cancelled { task.cancel() }
         Task { @MainActor [gameServer] in await gameServer?.stop() }
     }

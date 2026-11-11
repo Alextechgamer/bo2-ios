@@ -31,6 +31,7 @@ final class SteamGameServerService {
     }
     @Published private(set) var snapshot = Snapshot()
     var eventsDidChange: (@MainActor () -> Void)?
+    var integrityStopped: (@MainActor () -> Void)?
     var serverSteamID: UInt64 { snapshot.steamID }
     var isLoggedOn: Bool { snapshot.loggedOn }
     var secureStatus: Bool? { snapshot.secure }
@@ -46,6 +47,7 @@ final class SteamGameServerService {
         self.appID = appID
         self.session = session ?? SteamSession(authentication: .anonymousGameServer(appID: appID))
         self.session.identityDidChange = { [weak self] id in
+            if id == 0, self?.session.unsupportedIntegrityMessage != nil { self?.integrityStopped?() }
             guard let self, id == 0, snapshot.loggedOn else { return }
             snapshot = Snapshot()
             emit(callback: 103, result: 3)
