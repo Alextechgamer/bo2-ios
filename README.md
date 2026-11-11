@@ -55,7 +55,7 @@ Everything below was observed once or a few times on the hardware named.
 |---|---|---|
 | Local multiplayer on an iPhone 17 Pro Max | **57–62 fps** (median 62) | one local match on Hijacked, about 26,700 frames; frames the game submitted, read from the app's own log |
 | Online multiplayer on the same phone | **median 32 fps** (27–43 on screen) | one public match on Raid, while screen recording |
-| Zombies on the same phone | **median 18 fps**, dips below 10 | Town from round 20, while screen recording. An earlier build ran the same match near 60, so this is a regression under investigation |
+| Zombies on the same phone | **median 32 fps**, dips to 15 | Town from round 20, not recording, phone not hot. Frame rate falls as draw calls rise (about 35 fps at 1,700 draws a frame, 17 at 4,000). Screen recording lowered the same match to a median of 18 |
 | iOS simulator on a Mac | 54–60 fps | the readout in the current screenshots on this page, in a private Zombies and a private Multiplayer match |
 
 The phone figure counts frames the game hands to Metal. Frames actually shown on screen have not been measured yet.
