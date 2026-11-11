@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 from zipfile import ZipFile, ZIP_DEFLATED
+from runtime_catalog import write_catalog
 
 MODES = ("sps", "mps", "zms")
 
@@ -112,6 +113,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         if shaders.is_file():
             shutil.copyfile(shaders, app/shaders.name)
         game.extractall(app/"Game")
+        write_catalog(app, root)
         command("codesign","--force","--sign",identity,"--entitlements",ent,app)
         command("codesign","--verify","--deep","--strict",app)
         with tempfile.NamedTemporaryFile(dir=out.parent,delete=False) as f:

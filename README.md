@@ -20,7 +20,11 @@ For **Join Private Server**, also pass `--lan-root "$LAN_BUILD"`. Under each of 
 
 ## Steam account
 
-Choose **Sign in to Steam** in the launcher for account/password or QR sign-in with Steam Guard. The app stores the resulting session in its own device-local Keychain entry. Open **Steam account** to sign out. This integration currently covers account sign-in. Steam library downloads, cloud saves and authenticated game matchmaking still require their game-session integrations and testing.
+Choose **Sign in to Steam** in the launcher for account/password or QR sign-in with Steam Guard. The app stores the resulting session in its own device-local Keychain entry. Open **Steam account** to sign out. **Steam library** lists owned games and apps, with Play available only for packaged runtimes and installed files whose compatibility checks pass. Other owned titles remain visible as unavailable. Cancelling a refresh retains the last library for the same account and marks it stale.
+
+Native runtime integration delivers genuine encrypted app tickets and uses a separate anonymous Steam game-server session with genuine security-policy status. These are Steam connection milestones. Official game matchmaking, library downloads and cloud-save transfers are not verified yet.
+
+Packaging generates `RuntimeCatalog.json` from the final signed framework binaries and matching sections. Original Steam executable hashes are kept separate from unpacked build-input hashes. Downloads cannot launch unless the private build's `runtime-provenance.json` records a verified matching original-to-unpacked association; missing evidence disables that path. Campaign's Steam entry stays unavailable until its framework includes the native provider ABI. Existing receipt-based launcher buttons remain available.
 
 **Install or verify game files** opens the existing private library installer, which uses its own Steam OpenID authorization. The native sign-in module is adapted from iDeck at revision `2ac39beff91251d36f3ad6331d3f8402b3c10e18`. Its sources, GPL-3.0-or-later license, exception and attribution are in `ios/SteamAuth/`; built apps include the notices in `SteamAuthNotices`.
 

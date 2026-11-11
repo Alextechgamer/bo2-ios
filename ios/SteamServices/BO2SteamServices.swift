@@ -134,4 +134,14 @@ final class BO2SteamServices: ObservableObject {
         refreshTask = task
         await task.value
     }
+
+    func cancelLibraryRefresh() {
+        guard refreshTask != nil else { return }
+        generation &+= 1
+        refreshTask?.cancel()
+        refreshTask = nil
+        let previous = state.snapshot
+        let matching = previous?.steamID == authenticatedSteamID ? previous : nil
+        state = .failed(message: "Refresh cancelled. Showing the last library update.", previous: matching)
+    }
 }

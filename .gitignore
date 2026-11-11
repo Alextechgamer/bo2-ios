@@ -26,6 +26,7 @@
 !/ios/build_shader_library.py
 !/ios/index_library.py
 !/ios/package_game.py
+!/ios/runtime_catalog.py
 !/ios/steam_install_server.py
 !/ios/steam_receipt.py
 !/lan/

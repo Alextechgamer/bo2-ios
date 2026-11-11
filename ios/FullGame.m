@@ -181,6 +181,13 @@ static NSURL *GameDirectory(NSError **error) {
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(updateSteamAccount:)
         name:@"BO2SteamSignInDidChange" object:nil];
     [self updateSteamAccount:nil];
+    UIButton *library=[UIButton buttonWithType:UIButtonTypeSystem];
+    library.accessibilityIdentifier=@"steam-library";
+    [library setTitle:@"Steam library" forState:UIControlStateNormal];
+    [library addTarget:self action:@selector(steamLibrary) forControlEvents:UIControlEventTouchUpInside];
+    [_menu addArrangedSubview:library];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(steamLibraryPlay:)
+        name:@"BO2SteamLibraryPlay" object:nil];
     UIButton *steam=[UIButton buttonWithType:UIButtonTypeSystem];
     [steam setTitle:@"Install or verify game files" forState:UIControlStateNormal];
     [steam addTarget:self action:@selector(steamInstall) forControlEvents:UIControlEventTouchUpInside];
@@ -334,6 +341,15 @@ static NSURL *GameDirectory(NSError **error) {
 - (void)steamAccount {
     if (_installer || _started || _checking) return;
     [BO2SteamSignIn presentFromViewController:self];
+}
+- (void)steamLibrary {
+    if (_installer || _started || _checking) return;
+    [BO2SteamSignIn presentLibraryFromViewController:self];
+}
+- (void)steamLibraryPlay:(NSNotification *)notification {
+    NSString *mode=notification.userInfo[@"mode"];
+    if (![mode isKindOfClass:NSString.class] || !Modes()[mode]) return;
+    [self startSteam:mode];
 }
 - (void)finishSteamLaunch {
     [_steamLaunch finish];

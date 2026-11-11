@@ -20,4 +20,19 @@ final class BO2SteamSignIn: NSObject {
     @objc static func accountName() -> String? {
         SteamSignIn.accountName
     }
+
+    @objc(presentLibraryFromViewController:)
+    static func presentLibrary(fromViewController presenter: UIViewController) {
+        guard presenter.presentedViewController == nil else { return }
+        let view = BO2SteamLibraryView(services: .shared) { [weak presenter] mode in
+            guard ["sps", "mps", "zms"].contains(mode) else { return }
+            presenter?.dismiss(animated: true) {
+                NotificationCenter.default.post(name: Notification.Name("BO2SteamLibraryPlay"),
+                    object: nil, userInfo: ["mode": mode])
+            }
+        }
+        let controller = UIHostingController(rootView: view)
+        controller.modalPresentationStyle = .formSheet
+        presenter.present(controller, animated: true)
+    }
 }

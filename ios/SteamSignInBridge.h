@@ -4,6 +4,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface BO2SteamSignIn : NSObject
 + (void)presentFromViewController:(UIViewController *)presenter;
++ (void)presentLibraryFromViewController:(UIViewController *)presenter;
 + (nullable NSString *)accountName;
 @end
 
