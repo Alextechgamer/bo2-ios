@@ -46,8 +46,8 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
                   CURRENT_PROJECT_VERSION="1",MARKETING_VERSION="0.1",IPHONEOS_DEPLOYMENT_TARGET="16.0",
                   SWIFT_VERSION="5.0",SWIFT_OBJC_BRIDGING_HEADER="SteamRuntimeProvider.h")
     project=dict(name="BlackOpsII",targets={"BlackOpsII":dict(type="application",platform="iOS",
-                 sources=["FullGame.m","SteamServices",dict(path="SteamAuth",excludes=["COPYING","LICENSE-EXCEPTION.md","docs","UPSTREAM.md"])],
-                 dependencies=[{"sdk":"AuthenticationServices.framework"}],settings={"base":settings})})
+                 sources=["FullGame.m","TouchOverlay.m","SteamServices",dict(path="SteamAuth",excludes=["COPYING","LICENSE-EXCEPTION.md","docs","UPSTREAM.md"])],
+                 dependencies=[{"sdk":"AuthenticationServices.framework"},{"sdk":"AVFAudio.framework"}],settings={"base":settings})})
     out.parent.mkdir(parents=True,exist_ok=True)
     work.mkdir(parents=True,exist_ok=True)
     with ZipFile(game_zip) as game, tempfile.TemporaryDirectory(dir=work) as folder:
@@ -64,6 +64,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
             raise RuntimeError("Insufficient space to stage the complete game on the selected volume")
         shutil.copyfile(src/"FullGame.m",stage/"FullGame.m")
         shutil.copyfile(src/"SteamInstaller.h",stage/"SteamInstaller.h")
+        for name in ("TouchOverlay.h","TouchOverlay.m"): shutil.copyfile(src/name,stage/name)
         shutil.copyfile(src/"SteamSignInBridge.h",stage/"SteamSignInBridge.h")
         shutil.copyfile(src/"SteamRuntimeProvider.h",stage/"SteamRuntimeProvider.h")
         shutil.copytree(src/"SteamAuth",stage/"SteamAuth")

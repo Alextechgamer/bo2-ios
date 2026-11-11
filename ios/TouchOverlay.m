@@ -1,0 +1,485 @@
+#import "TouchOverlay.h"
+#import <QuartzCore/QuartzCore.h>
+#include <dlfcn.h>
+#include <math.h>
+#include <string.h>
+
+// Pads use XInput button masks. Fire and ADS are the triggers and carry no mask.
+// dx, dy and size place the right-hand pads from the bottom-right corner of the
+// safe area on a 430-point-high screen. The others get their defaults in code.
+static const struct BO2Pad { const char *title; unsigned mask; CGFloat dx, dy, size; } kPads[] = {
+    {"FIRE", 0, 78, 70, 76},          {"ADS", 0, 162, 46, 60},
+    {"JUMP", 0x1000, 40, 150, 56},    {"CROUCH", 0x2000, 118, 150, 56},
+    {"RELOAD", 0x4000, 192, 118, 52}, {"SWAP", 0x8000, 40, 218, 48},
+    {"KNIFE", 0x80, 112, 208, 48},    {"FRAG", 0x200, 238, 40, 46}, {"TAC", 0x100, 292, 40, 46},
+    {"II", 0x10, 0, 0, 40}, {"SCORE", 0x20, 0, 0, 48},
+    {"▲", 1, 0, 0, 36}, {"▼", 2, 0, 0, 36}, {"◀", 4, 0, 0, 36}, {"▶", 8, 0, 0, 36},
+};
+enum {
+    kFire = 0, kAim = 1,
+    kRightCluster = 9,   // pads below this index sit on the right and also steer the view
+    kPause = 9, kScore = 10, kUp = 11,
+    kPadCount = sizeof(kPads) / sizeof(kPads[0]),
+    kRoleMove = -1, kRoleLook = -2, kRoleEdit = -3,
+    kSprint = 0x40,      // left stick click
+};
+static NSString *const kLayoutKey = @"BO2TouchLayout";
+
+// Two states. "Menu" lets every touch through to the game as a mouse pointer, so
+// menus are tapped directly. "Play" shows the controls: the left side is a move
+// stick that appears under the thumb, the right side turns the view, and a drag
+// that starts on a right-hand pad keeps turning while the pad is held.
+// Multiplayer and Zombies switch to Play when the match starts and back when it ends.
+@implementation BO2TouchOverlay {
+    void (*_pad)(unsigned, bool, bool, float, float, float, float);
+    void (*_cursorRead)(double *, double *);
+    void (*_cursorSet)(double, double);
+    uint8_t **_arena;
+    uint32_t _stateAddress, _clientState;
+    NSMutableArray<UILabel *> *_pads;
+    NSMutableDictionary<NSString *, NSArray<NSNumber *> *> *_layout;   // title -> x, y (fractions of the safe area), size
+    UIView *_stickBase, *_stickKnob, *_panel, *_editBar;
+    UIButton *_modeButton, *_gear;
+    UISegmentedControl *_lookMode, *_aimMode;
+    UISlider *_speed, *_size;
+    NSMapTable<UITouch *, NSNumber *> *_roles;
+    CADisplayLink *_link;
+    UIImpactFeedbackGenerator *_haptic;
+    CGPoint _moveOrigin, _move, _look, _lookDelta, _lookSmooth, _grab;
+    CGFloat _stickRadius, _sensitivity;
+    NSInteger _selected;
+    unsigned _held, _sentButtons;
+    float _sentAxes[4];
+    BOOL _sentAim, _sentFire, _play, _moving, _sprint, _stickLook, _aimToggle, _aimLatched, _editing;
+}
+- (instancetype)initWithFrame:(CGRect)frame handle:(void *)handle mode:(NSString *)mode {
+    if (!(self = [super initWithFrame:frame])) return nil;
+    _pad = dlsym(handle, "ios_touch_pad");
+    _cursorRead = dlsym(handle, "ios_cursor_read");
+    _cursorSet = dlsym(handle, "ios_cursor_set");
+    _arena = dlsym(handle, "bo2_g_base");
+    if (!_pad || !_cursorRead || !_cursorSet) return nil;
+    // Client connection state in guest memory: 10 while the player is in a match.
+    _stateAddress = [mode isEqualToString:@"mps"] ? 0x10e9d88 : [mode isEqualToString:@"zms"] ? 0x10e7e18 : 0;
+    self.multipleTouchEnabled = YES;
+    _selected = NSNotFound;
+    _roles = [NSMapTable strongToStrongObjectsMapTable];
+    _haptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
+    NSUserDefaults *saved = NSUserDefaults.standardUserDefaults;
+    double speed = [saved doubleForKey:@"BO2LookSensitivity"];
+    _sensitivity = speed >= 0.2 && speed <= 5 ? speed : 1;
+    _stickLook = [saved boolForKey:@"BO2StickLook"];
+    _aimToggle = [saved boolForKey:@"BO2AimToggle"];
+    _layout = [([saved dictionaryForKey:kLayoutKey] ?: @{}) mutableCopy];
+    _pads = [NSMutableArray array];
+    for (unsigned i = 0; i < kPadCount; i++) {
+        UILabel *pad = [UILabel new];
+        pad.text = @(kPads[i].title);
+        pad.textAlignment = NSTextAlignmentCenter;
+        pad.textColor = [UIColor colorWithWhite:1 alpha:0.9];
+        pad.font = [UIFont systemFontOfSize:i == kFire ? 14 : 10 weight:UIFontWeightHeavy];
+        pad.adjustsFontSizeToFitWidth = YES;
+        pad.layer.borderWidth = 1.5;
+        pad.clipsToBounds = YES;
+        pad.hidden = YES;
+        [self addSubview:pad];
+        [_pads addObject:pad];
+    }
+    _stickBase = [self ring:0.3];
+    _stickKnob = [self ring:0.6];
+    _modeButton = [self button:nil action:@selector(toggleMode)];
+    _gear = [self button:nil action:@selector(togglePanel)];
+    [_gear setImage:[UIImage systemImageNamed:@"gearshape.fill"] forState:UIControlStateNormal];
+    _gear.tintColor = UIColor.whiteColor;
+    [self buildPanel];
+    [self buildEditBar];
+    [self setPlay:NO];
+    [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(resetInput)
+        name:UIApplicationWillResignActiveNotification object:nil];
+    return self;
+}
+- (UIButton *)button:(NSString *)title action:(SEL)action {
+    UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+    [button setTitle:title forState:UIControlStateNormal];
+    button.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+    button.backgroundColor = [UIColor colorWithWhite:0 alpha:0.5];
+    button.layer.cornerRadius = 10;
+    [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    [self addSubview:button];
+    return button;
+}
+- (UIView *)ring:(CGFloat)alpha {
+    UIView *ring = [UIView new];
+    ring.backgroundColor = [UIColor colorWithWhite:1 alpha:alpha * 0.4];
+    ring.layer.borderWidth = 1.5;
+    ring.layer.borderColor = [UIColor colorWithWhite:1 alpha:alpha].CGColor;
+    ring.userInteractionEnabled = NO;
+    ring.hidden = YES;
+    [self addSubview:ring];
+    return ring;
+}
+- (UILabel *)caption:(NSString *)text {
+    UILabel *label = [UILabel new];
+    label.text = text;
+    label.textColor = [UIColor colorWithWhite:1 alpha:0.7];
+    label.font = [UIFont systemFontOfSize:12];
+    return label;
+}
+- (UIView *)card:(NSArray<UIView *> *)rows axis:(UILayoutConstraintAxis)axis {
+    UIView *card = [UIView new];
+    card.backgroundColor = [UIColor colorWithWhite:0.08 alpha:0.94];
+    card.layer.cornerRadius = 14;
+    card.hidden = YES;
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:rows];
+    stack.axis = axis;
+    stack.spacing = axis == UILayoutConstraintAxisVertical ? 6 : 10;
+    stack.alignment = axis == UILayoutConstraintAxisVertical ? UIStackViewAlignmentFill : UIStackViewAlignmentCenter;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:12],
+        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-12],
+        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:8],
+        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-8]
+    ]];
+    [self addSubview:card];
+    return card;
+}
+// Settings: how the view turns, how fast, how ADS behaves, and the layout editor.
+- (void)buildPanel {
+    _lookMode = [[UISegmentedControl alloc] initWithItems:@[@"Swipe", @"Stick"]];
+    _lookMode.selectedSegmentIndex = _stickLook ? 1 : 0;
+    _aimMode = [[UISegmentedControl alloc] initWithItems:@[@"Hold", @"Tap"]];
+    _aimMode.selectedSegmentIndex = _aimToggle ? 1 : 0;
+    _speed = [UISlider new];
+    _speed.minimumValue = 0.2;
+    _speed.maximumValue = 3;
+    _speed.value = (float)_sensitivity;
+    for (UIControl *control in @[_lookMode, _aimMode, _speed])
+        [control addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
+    UIButton *edit = [self button:@"Edit layout" action:@selector(beginEditing)];
+    UIButton *reset = [self button:@"Reset layout" action:@selector(resetLayout)];
+    edit.backgroundColor = reset.backgroundColor = [UIColor colorWithWhite:1 alpha:0.14];
+    UIStackView *buttons = [[UIStackView alloc] initWithArrangedSubviews:@[edit, reset]];
+    buttons.distribution = UIStackViewDistributionFillEqually;
+    buttons.spacing = 8;
+    [buttons.heightAnchor constraintEqualToConstant:32].active = YES;
+    _panel = [self card:@[[self caption:@"Look"], _lookMode, [self caption:@"Look speed"], _speed,
+                          [self caption:@"ADS"], _aimMode, buttons] axis:UILayoutConstraintAxisVertical];
+}
+// Shown while editing: drag a pad to move it, use the slider to resize the selected one.
+- (void)buildEditBar {
+    _size = [UISlider new];
+    _size.minimumValue = 30;
+    _size.maximumValue = 120;
+    [_size addTarget:self action:@selector(sizeChanged) forControlEvents:UIControlEventValueChanged];
+    [_size.widthAnchor constraintEqualToConstant:170].active = YES;
+    UIButton *done = [self button:@"Done" action:@selector(endEditing)];
+    done.backgroundColor = [UIColor colorWithRed:0.2 green:0.55 blue:0.3 alpha:1];
+    [done.widthAnchor constraintEqualToConstant:64].active = YES;
+    [done.heightAnchor constraintEqualToConstant:30].active = YES;
+    _editBar = [self card:@[[self caption:@"Drag to move · Size"], _size, done] axis:UILayoutConstraintAxisHorizontal];
+}
+- (void)settingsChanged {
+    _stickLook = _lookMode.selectedSegmentIndex == 1;
+    _aimToggle = _aimMode.selectedSegmentIndex == 1;
+    _sensitivity = _speed.value;
+    NSUserDefaults *saved = NSUserDefaults.standardUserDefaults;
+    [saved setBool:_stickLook forKey:@"BO2StickLook"];
+    [saved setBool:_aimToggle forKey:@"BO2AimToggle"];
+    [saved setDouble:_sensitivity forKey:@"BO2LookSensitivity"];
+    [self resetInput];
+}
+- (void)togglePanel {
+    if (_editing) return;
+    _panel.hidden = !_panel.hidden;
+    if (!_panel.hidden) [self resetInput];
+}
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [_link invalidate];
+    _link = nil;
+    if (!self.window) { [self resetInput]; return; }
+    _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
+    _link.preferredFramesPerSecond = 60;
+    [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+}
+
+#pragma mark Layout
+
+- (CGRect)safe { return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets); }
+- (CGFloat)scale { return MAX(0.8, MIN(1.2, [self safe].size.height / 430)); }
+// Centre and size of a pad before the player moves it.
+- (CGRect)defaultFrame:(NSUInteger)i {
+    CGRect safe = [self safe];
+    CGFloat scale = [self scale], size = kPads[i].size * scale;
+    CGFloat left = CGRectGetMinX(safe) + 8, top = CGRectGetMinY(safe) + 4;
+    CGPoint centre;
+    if (i < kRightCluster) {
+        centre = CGPointMake(CGRectGetMaxX(safe) - 4 - kPads[i].dx * scale, CGRectGetMaxY(safe) - 4 - kPads[i].dy * scale);
+    } else if (i == kPause) {
+        centre = CGPointMake(left + 150, top + 20);
+    } else if (i == kScore) {
+        centre = CGPointMake(left + 204, top + 20);
+    } else {
+        // Scorestreak and menu D-pad, top centre-left, out of the move thumb's way.
+        CGFloat cx = left + 290 + size, cy = top + size * 1.5;
+        CGPoint offset[4] = {{0, -size}, {0, size}, {-size, 0}, {size, 0}};
+        centre = CGPointMake(cx + offset[i - kUp].x, cy + offset[i - kUp].y);
+    }
+    return CGRectMake(centre.x - size / 2, centre.y - size / 2, size, size);
+}
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGRect safe = [self safe];
+    CGFloat left = CGRectGetMinX(safe) + 8, top = CGRectGetMinY(safe) + 4;
+    for (NSUInteger i = 0; i < kPadCount; i++) {
+        CGRect frame = [self defaultFrame:i];
+        NSArray<NSNumber *> *custom = _layout[@(kPads[i].title)];
+        if (custom.count == 3) {
+            CGFloat size = MAX(30, MIN(120, custom[2].doubleValue));
+            frame = CGRectMake(CGRectGetMinX(safe) + custom[0].doubleValue * safe.size.width - size / 2,
+                               CGRectGetMinY(safe) + custom[1].doubleValue * safe.size.height - size / 2, size, size);
+        }
+        _pads[i].frame = frame;
+        _pads[i].layer.cornerRadius = i < kRightCluster ? frame.size.width / 2 : 10;
+    }
+    _modeButton.frame = CGRectMake(left, top, 72, 34);
+    _gear.frame = CGRectMake(left + 80, top, 40, 34);
+    _panel.frame = CGRectMake(left, top + 42, 250, 252);
+    _editBar.frame = CGRectMake(CGRectGetMidX(safe) - 190, top, 380, 46);
+    _stickRadius = 60 * [self scale];
+    _stickBase.bounds = CGRectMake(0, 0, _stickRadius * 2, _stickRadius * 2);
+    _stickBase.layer.cornerRadius = _stickRadius;
+    _stickKnob.bounds = CGRectMake(0, 0, _stickRadius * 0.9, _stickRadius * 0.9);
+    _stickKnob.layer.cornerRadius = _stickRadius * 0.45;
+}
+- (void)stylePads {
+    for (NSUInteger i = 0; i < kPadCount; i++) {
+        UILabel *pad = _pads[i];
+        BOOL lit = _editing ? (NSInteger)i == _selected : (i == kAim && _aimLatched) || (_held & (1u << i));
+        pad.backgroundColor = lit ? [UIColor colorWithRed:1 green:0.55 blue:0.1 alpha:0.5]
+            : i == kFire ? [UIColor colorWithRed:0.75 green:0.15 blue:0.1 alpha:0.42] : [UIColor colorWithWhite:0 alpha:0.32];
+        pad.layer.borderColor = (_editing ? [UIColor colorWithRed:1 green:0.6 blue:0.2 alpha:0.9]
+                                          : [UIColor colorWithWhite:1 alpha:0.5]).CGColor;
+    }
+}
+- (void)beginEditing {
+    [self resetInput];
+    _editing = YES;
+    _selected = NSNotFound;
+    _panel.hidden = YES;
+    _editBar.hidden = NO;
+    _size.enabled = NO;
+    [self stylePads];
+}
+- (void)endEditing {
+    _editing = NO;
+    _editBar.hidden = YES;
+    [NSUserDefaults.standardUserDefaults setObject:_layout forKey:kLayoutKey];
+    [self stylePads];
+}
+- (void)resetLayout {
+    [_layout removeAllObjects];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:kLayoutKey];
+    [self setNeedsLayout];
+}
+// Record a pad's frame as fractions of the safe area, so it survives rotation and other screens.
+- (void)storePad:(NSUInteger)i {
+    CGRect safe = [self safe], frame = _pads[i].frame;
+    _layout[@(kPads[i].title)] = @[@((CGRectGetMidX(frame) - CGRectGetMinX(safe)) / safe.size.width),
+                                   @((CGRectGetMidY(frame) - CGRectGetMinY(safe)) / safe.size.height), @(frame.size.width)];
+}
+- (void)sizeChanged {
+    if (_selected == NSNotFound) return;
+    CGPoint centre = _pads[_selected].center;
+    CGFloat size = _size.value;
+    _pads[_selected].frame = CGRectMake(centre.x - size / 2, centre.y - size / 2, size, size);
+    [self storePad:_selected];
+    [self setNeedsLayout];
+}
+
+#pragma mark Touches
+
+// In Menu, only the mode button takes touches; the rest reaches the game as a pointer.
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    if (_editing) {
+        UIView *hit = [_editBar hitTest:[self convertPoint:point toView:_editBar] withEvent:event];
+        return hit ?: self;
+    }
+    if (CGRectContainsPoint(_modeButton.frame, point)) return _modeButton;
+    if (!_play) return nil;
+    if (CGRectContainsPoint(_gear.frame, point)) return _gear;
+    if (!_panel.hidden) {
+        UIView *hit = [_panel hitTest:[self convertPoint:point toView:_panel] withEvent:event];
+        if (hit) return hit;
+        _panel.hidden = YES;   // a touch outside closes the panel
+    }
+    return [self pointInside:point withEvent:event] ? self : nil;
+}
+- (void)setPlay:(BOOL)play {
+    if (_editing) [self endEditing];
+    _play = play;
+    [_modeButton setTitle:play ? @"Menu" : @"Controls" forState:UIControlStateNormal];
+    for (UIView *pad in _pads) pad.hidden = !play;
+    _gear.hidden = !play;
+    _panel.hidden = YES;
+    [self resetInput];
+}
+- (void)toggleMode { [self setPlay:!_play]; }
+- (void)publish {
+    unsigned buttons = _sprint ? kSprint : 0;
+    for (unsigned i = 0; i < kPadCount; i++) if (_held & (1u << i)) buttons |= kPads[i].mask;
+    BOOL aim = _aimToggle ? _aimLatched : (_held & (1u << kAim)) != 0, fire = (_held & (1u << kFire)) != 0;
+    float axes[4] = {(float)_move.x, (float)_move.y, (float)_look.x, (float)_look.y};
+    // The link ticks every frame, so only forward real changes to the game.
+    if (buttons == _sentButtons && aim == _sentAim && fire == _sentFire && !memcmp(axes, _sentAxes, sizeof(axes))) return;
+    _sentButtons = buttons; _sentAim = aim; _sentFire = fire;
+    memcpy(_sentAxes, axes, sizeof(axes));
+    _pad(buttons, aim, fire, axes[0], axes[1], axes[2], axes[3]);
+}
+- (void)showStickAt:(CGPoint)knob {
+    _stickBase.center = _moveOrigin;
+    _stickKnob.center = knob;
+    _stickBase.hidden = _stickKnob.hidden = NO;
+}
+// The closest pad whose enlarged outline contains the point.
+- (NSInteger)padAt:(CGPoint)p {
+    NSInteger found = NSNotFound;
+    CGFloat nearest = CGFLOAT_MAX;
+    for (NSUInteger i = 0; i < _pads.count; i++) {
+        CGRect frame = _pads[i].frame;
+        CGFloat distance = hypot(p.x - CGRectGetMidX(frame), p.y - CGRectGetMidY(frame));
+        if (CGRectContainsPoint(CGRectInset(frame, -8, -8), p) && distance < nearest) { nearest = distance; found = (NSInteger)i; }
+    }
+    return found;
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    for (UITouch *touch in touches) {
+        CGPoint p = [touch locationInView:self];
+        NSInteger role = [self padAt:p];
+        if (_editing) {
+            if (role == NSNotFound || _roles.count) continue;   // one pad at a time
+            _selected = role;
+            _grab = CGPointMake(p.x - _pads[role].center.x, p.y - _pads[role].center.y);
+            _size.enabled = YES;
+            _size.value = (float)_pads[role].frame.size.width;
+            [_roles setObject:@(kRoleEdit) forKey:touch];
+            continue;
+        }
+        if (role != NSNotFound) {
+            _held |= 1u << role;
+            if (role == kAim && _aimToggle) _aimLatched = !_aimLatched;
+            [_haptic impactOccurred];
+        } else if (p.x < CGRectGetWidth(self.bounds) * 0.45) {
+            if (_moving) continue;   // one move stick; extra fingers on the left do nothing
+            role = kRoleMove;
+            _moving = YES;
+            _moveOrigin = p;
+            [self showStickAt:p];
+        } else {
+            role = kRoleLook;
+        }
+        [_roles setObject:@(role) forKey:touch];
+    }
+    [self stylePads];
+    if (!_editing) [self publish];
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    for (UITouch *touch in touches) {
+        NSNumber *entry = [_roles objectForKey:touch];
+        if (!entry) continue;
+        NSInteger role = entry.integerValue;
+        CGPoint p = [touch locationInView:self];
+        if (role == kRoleEdit) {
+            CGRect bounds = self.bounds;
+            _pads[_selected].center = CGPointMake(MAX(20, MIN(CGRectGetMaxX(bounds) - 20, p.x - _grab.x)),
+                                                  MAX(20, MIN(CGRectGetMaxY(bounds) - 20, p.y - _grab.y)));
+            [self storePad:_selected];
+        } else if (role == kRoleMove) {
+            CGFloat dx = p.x - _moveOrigin.x, dy = p.y - _moveOrigin.y, length = hypot(dx, dy);
+            if (length > _stickRadius) {
+                // Drag the base along so the thumb never runs off the stick.
+                _moveOrigin.x = p.x - dx / length * _stickRadius;
+                _moveOrigin.y = p.y - dy / length * _stickRadius;
+                dx = p.x - _moveOrigin.x; dy = p.y - _moveOrigin.y;
+            }
+            // A small dead zone keeps a resting thumb from creeping.
+            CGFloat tilt = hypot(dx, dy) / _stickRadius;
+            CGFloat gain = tilt < 0.12 ? 0 : (tilt - 0.12) / 0.88 / tilt;
+            _move = CGPointMake(dx / _stickRadius * gain, -dy / _stickRadius * gain);
+            _sprint = tilt > 0.94 && _move.y > 0.75;
+            [self showStickAt:p];
+        } else if (role == kRoleLook || role < kRightCluster) {
+            CGPoint before = [touch previousLocationInView:self];
+            CGFloat dx = p.x - before.x, dy = p.y - before.y;
+            if (_stickLook) {
+                _lookDelta.x += dx;
+                _lookDelta.y += dy;
+            } else {
+                // Swipe look: the game reads pointer travel exactly as it reads a mouse.
+                // Faster swipes turn a little further, as mouse acceleration does.
+                CGFloat boost = 1 + MIN(1.0, hypot(dx, dy) / 40);
+                double x, y;
+                _cursorRead(&x, &y);
+                _cursorSet(x + dx * 3.2 * _sensitivity * boost, y + dy * 3.2 * _sensitivity * boost);
+            }
+        }
+    }
+    if (!_editing) [self publish];
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    for (UITouch *touch in touches) {
+        NSNumber *entry = [_roles objectForKey:touch];
+        if (!entry) continue;
+        [_roles removeObjectForKey:touch];
+        NSInteger role = entry.integerValue;
+        if (role == kRoleMove) {
+            _moving = _sprint = NO;
+            _move = CGPointZero;
+            _stickBase.hidden = _stickKnob.hidden = YES;
+        } else if (role >= 0) {
+            _held &= ~(1u << role);
+        }
+    }
+    [self stylePads];
+    if (!_editing) [self publish];
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [self touchesEnded:touches withEvent:event];
+}
+- (void)tick:(CADisplayLink *)link {
+    // Show the controls when a match starts and give the pointer back when it ends.
+    if (_stateAddress && _arena && *_arena) {
+        uint32_t state;
+        memcpy(&state, *_arena + _stateAddress, sizeof(state));
+        if ((state == 10) != (_clientState == 10)) [self setPlay:state == 10];
+        _clientState = state;
+    }
+    if (!_play || !_stickLook || _editing) return;
+    // Stick look: about 18 points of travel per frame is a full deflection at speed 1.
+    CGFloat scale = _sensitivity / 18.0;
+    _lookSmooth.x = 0.4 * _lookSmooth.x + 0.6 * _lookDelta.x * scale;
+    _lookSmooth.y = 0.4 * _lookSmooth.y - 0.6 * _lookDelta.y * scale;
+    _lookDelta = CGPointZero;
+    CGFloat length = hypot(_lookSmooth.x, _lookSmooth.y);
+    if (length < 0.03) {
+        _lookSmooth = _look = CGPointZero;
+    } else {
+        // Start above the game's stick dead zone so slow swipes still turn.
+        CGFloat out = 0.22 + 0.78 * MIN(1.0, length);
+        _look = CGPointMake(_lookSmooth.x / length * out, _lookSmooth.y / length * out);
+    }
+    [self publish];
+}
+- (void)resetInput {
+    [_roles removeAllObjects];
+    _held = 0;
+    _moving = _sprint = _aimLatched = NO;
+    _move = _look = _lookDelta = _lookSmooth = CGPointZero;
+    _stickBase.hidden = _stickKnob.hidden = YES;
+    [self stylePads];
+    _sentButtons = ~0u;   // force one publish so the game always sees the release
+    [self publish];
+}
+@end

@@ -34,6 +34,7 @@ enum EMsg: UInt32 {
     case clientLogonResponse = 751
     case clientLogOff = 706
     case clientLoggedOff = 757
+    case clientAccountInfo = 768
     case clientLicenseList = 780
     case clientVACBanStatus = 782
     case gsServerType = 908

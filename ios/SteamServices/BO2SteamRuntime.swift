@@ -11,6 +11,8 @@ import Darwin
 @objc(BO2SteamLaunch)
 final class BO2SteamLaunch: NSObject {
     @objc let gameDirectory: String
+    /// Steam display name for the in-game player name. Empty when Steam has not sent it.
+    @objc let personaName: String
     fileprivate let context: BO2SteamRuntimeContext
     private let services: BO2SteamServices
     private let lease: UUID
@@ -21,6 +23,7 @@ final class BO2SteamLaunch: NSObject {
     fileprivate init(gameDirectory: URL, context: BO2SteamRuntimeContext,
                      services: BO2SteamServices, lease: UUID, account: UInt64, revision: UInt64) {
         self.gameDirectory = gameDirectory.path
+        self.personaName = (services.session as? SteamSession)?.personaName ?? ""
         self.context = context
         self.services = services
         self.lease = lease

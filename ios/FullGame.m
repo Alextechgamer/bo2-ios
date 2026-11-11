@@ -1,12 +1,15 @@
 #import <UIKit/UIKit.h>
+#import <AVFAudio/AVFAudio.h>
 #import "SteamInstaller.h"
 #import "SteamSignInBridge.h"
+#import "TouchOverlay.h"
 #include <dlfcn.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <poll.h>
 #include <ifaddrs.h>
+#include <sys/stat.h>
 
 static NSDictionary<NSString *,NSString *> *Modes(void) {
     return @{@"sps":@"Campaign", @"mps":@"Multiplayer", @"zms":@"Zombies"};
@@ -134,6 +137,93 @@ static NSURL *GameDirectory(NSError **error) {
     return root;
 }
 
+// Launcher buttons. A card is one game mode; a chip is a secondary action.
+static UIButton *Card(NSString *title, NSString *subtitle, NSString *symbol) {
+    UIButtonConfiguration *look = UIButtonConfiguration.filledButtonConfiguration;
+    look.title = title;
+    look.subtitle = subtitle;
+    look.image = [UIImage systemImageNamed:symbol];
+    look.imagePlacement = NSDirectionalRectEdgeTop;
+    look.imagePadding = 14;
+    look.titlePadding = 4;
+    look.titleAlignment = UIButtonConfigurationTitleAlignmentCenter;
+    look.preferredSymbolConfigurationForImage =
+        [UIImageSymbolConfiguration configurationWithPointSize:34 weight:UIImageSymbolWeightSemibold];
+    look.baseBackgroundColor = [UIColor colorWithWhite:0.13 alpha:1];
+    look.baseForegroundColor = UIColor.whiteColor;
+    look.background.cornerRadius = 18;
+    look.background.strokeColor = [UIColor colorWithWhite:1 alpha:0.14];
+    look.background.strokeWidth = 1;
+    look.titleTextAttributesTransformer = ^NSDictionary *(NSDictionary *attributes) {
+        NSMutableDictionary *result = [attributes mutableCopy];
+        result[NSFontAttributeName] = [UIFont systemFontOfSize:22 weight:UIFontWeightBold];
+        return result;
+    };
+    look.subtitleTextAttributesTransformer = ^NSDictionary *(NSDictionary *attributes) {
+        NSMutableDictionary *result = [attributes mutableCopy];
+        result[NSForegroundColorAttributeName] = [UIColor colorWithWhite:1 alpha:0.6];
+        return result;
+    };
+    return [UIButton buttonWithConfiguration:look primaryAction:nil];
+}
+
+static UIButtonConfiguration *ChipLook(NSString *title, NSString *symbol, UIColor *tint) {
+    UIButtonConfiguration *look = UIButtonConfiguration.filledButtonConfiguration;
+    look.title = title;
+    look.image = symbol ? [UIImage systemImageNamed:symbol] : nil;
+    look.imagePadding = 8;
+    look.preferredSymbolConfigurationForImage =
+        [UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold];
+    look.baseBackgroundColor = [UIColor colorWithWhite:0.13 alpha:1];
+    look.baseForegroundColor = tint ?: [UIColor colorWithWhite:1 alpha:0.9];
+    look.background.cornerRadius = 12;
+    look.titleTextAttributesTransformer = ^NSDictionary *(NSDictionary *attributes) {
+        NSMutableDictionary *result = [attributes mutableCopy];
+        result[NSFontAttributeName] = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        return result;
+    };
+    return look;
+}
+static UIButton *Chip(NSString *title, NSString *symbol) {
+    return [UIButton buttonWithConfiguration:ChipLook(title, symbol, nil) primaryAction:nil];
+}
+
+// The game writes its diagnostics to stderr, which is discarded when the app is
+// opened from the Home Screen. Keep the current and previous run in Caches so a
+// crash can be read afterwards. A marker file tells the next launch about it.
+static NSURL *RunFile(NSString *name) {
+    NSURL *caches = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
+    return [caches URLByAppendingPathComponent:name];
+}
+static BOOL PreviousRunFailed(void) {
+    return [RunFile(@"run-active") checkResourceIsReachableAndReturnError:nil];
+}
+static BOOL gRunning;
+// Leaving the app is how a session normally ends, so the marker only stays
+// while the game is in the foreground.
+static void MarkRun(BOOL active) {
+    if (active) [NSFileManager.defaultManager createFileAtPath:RunFile(@"run-active").path contents:nil attributes:nil];
+    else [NSFileManager.defaultManager removeItemAtURL:RunFile(@"run-active") error:nil];
+}
+static void BeginRunLog(void) {
+    NSFileManager *files = NSFileManager.defaultManager;
+    gRunning = YES;
+    MarkRun(YES);
+    // Redirect only when the output would be discarded. A console, pipe or
+    // file set up by a test harness keeps receiving it.
+    struct stat out, null;
+    if (fstat(STDERR_FILENO, &out) || stat("/dev/null", &null) || !S_ISCHR(out.st_mode) || out.st_rdev != null.st_rdev) return;
+    NSURL *log = RunFile(@"last-run.log"), *previous = RunFile(@"previous-run.log");
+    [files removeItemAtURL:previous error:nil];
+    [files moveItemAtURL:log toURL:previous error:nil];
+    if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
+}
+static void EndRunLog(void) {
+    fflush(stderr);
+    gRunning = NO;
+    MarkRun(NO);
+}
+
 @interface ModePicker : UIViewController
 @end
 @implementation ModePicker {
@@ -151,57 +241,69 @@ static NSURL *GameDirectory(NSError **error) {
 }
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = UIColor.blackColor;
-    _menu = [UIStackView new];
+    self.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.045 blue:0.055 alpha:1];
+    UILabel *title = [UILabel new];
+    title.attributedText = [[NSAttributedString alloc] initWithString:@"BLACK OPS II" attributes:@{
+        NSKernAttributeName:@3, NSForegroundColorAttributeName:UIColor.whiteColor,
+        NSFontAttributeName:[UIFont systemFontOfSize:26 weight:UIFontWeightHeavy]}];
+    _steamAccount = Chip(nil, nil);
+    _steamAccount.accessibilityIdentifier = @"steam-account";
+    [_steamAccount addTarget:self action:@selector(steamAccount) forControlEvents:UIControlEventTouchUpInside];
+    [_steamAccount setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    UIStackView *header = [[UIStackView alloc] initWithArrangedSubviews:@[title, _steamAccount]];
+    header.alignment = UIStackViewAlignmentCenter;
+
+    UIStackView *modes = [UIStackView new];
+    modes.distribution = UIStackViewDistributionFillEqually;
+    modes.spacing = 12;
+    NSDictionary *detail = @{@"sps":@[@"Story missions", @"flag.fill"],
+                             @"mps":@[@"Online with Steam or local", @"person.3.fill"],
+                             @"zms":@[@"Survive the waves", @"bolt.heart.fill"]};
+    for (NSString *mode in @[@"sps",@"mps",@"zms"]) {
+        UIButton *card = Card(Modes()[mode], detail[mode][0], detail[mode][1]);
+        card.accessibilityIdentifier = mode;
+        [card addTarget:self action:@selector(choose:) forControlEvents:UIControlEventTouchUpInside];
+        [modes addArrangedSubview:card];
+    }
+
+    UIButton *join = Chip(@"Join Private Server", @"network");
+    [join addTarget:self action:@selector(pickServer) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *library = Chip(@"Steam Library", @"square.grid.2x2.fill");
+    library.accessibilityIdentifier = @"steam-library";
+    [library addTarget:self action:@selector(steamLibrary) forControlEvents:UIControlEventTouchUpInside];
+    UIButton *files = Chip(@"Game Files", @"arrow.down.circle.fill");
+    [files addTarget:self action:@selector(steamInstall) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *tools = [[UIStackView alloc] initWithArrangedSubviews:@[join, library, files]];
+    tools.distribution = UIStackViewDistributionFillEqually;
+    tools.spacing = 12;
+
+    _status = [UILabel new];
+    _status.textColor = [UIColor colorWithWhite:1 alpha:0.75];
+    _status.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+    _status.textAlignment = NSTextAlignmentCenter;
+    _status.numberOfLines = 2;
+
+    _menu = [[UIStackView alloc] initWithArrangedSubviews:@[header, modes, tools, _status]];
     _menu.axis = UILayoutConstraintAxisVertical;
-    _menu.spacing = 8;
+    _menu.spacing = 12;
     _menu.translatesAutoresizingMaskIntoConstraints = NO;
     [self.view addSubview:_menu];
-    UILabel *title = [UILabel new];
-    title.text = @"Black Ops II";
-    title.textColor = UIColor.whiteColor;
-    title.font = [UIFont preferredFontForTextStyle:UIFontTextStyleLargeTitle];
-    [_menu addArrangedSubview:title];
-    for (NSString *mode in @[@"sps",@"mps",@"zms"]) {
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeSystem];
-        button.configuration = UIButtonConfiguration.tintedButtonConfiguration;
-        [button setTitle:Modes()[mode] forState:UIControlStateNormal];
-        button.accessibilityIdentifier = mode;
-        [button addTarget:self action:@selector(choose:) forControlEvents:UIControlEventTouchUpInside];
-        [_menu addArrangedSubview:button];
-    }
-    UIButton *join = [UIButton buttonWithType:UIButtonTypeSystem];
-    join.configuration = UIButtonConfiguration.filledButtonConfiguration;
-    [join setTitle:@"Join Private Server" forState:UIControlStateNormal];
-    [join addTarget:self action:@selector(pickServer) forControlEvents:UIControlEventTouchUpInside];
-    [_menu addArrangedSubview:join];
-    _steamAccount=[UIButton buttonWithType:UIButtonTypeSystem];
-    _steamAccount.accessibilityIdentifier=@"steam-account";
-    [_steamAccount addTarget:self action:@selector(steamAccount) forControlEvents:UIControlEventTouchUpInside];
-    [_menu addArrangedSubview:_steamAccount];
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [_menu.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:20],
+        [_menu.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-20],
+        [_menu.topAnchor constraintEqualToAnchor:safe.topAnchor constant:14],
+        [_menu.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-10],
+        [header.heightAnchor constraintEqualToConstant:40],
+        [tools.heightAnchor constraintEqualToConstant:44],
+        [_status.heightAnchor constraintEqualToConstant:32]
+    ]];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(updateSteamAccount:)
         name:@"BO2SteamSignInDidChange" object:nil];
-    [self updateSteamAccount:nil];
-    UIButton *library=[UIButton buttonWithType:UIButtonTypeSystem];
-    library.accessibilityIdentifier=@"steam-library";
-    [library setTitle:@"Steam library" forState:UIControlStateNormal];
-    [library addTarget:self action:@selector(steamLibrary) forControlEvents:UIControlEventTouchUpInside];
-    [_menu addArrangedSubview:library];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(steamLibraryPlay:)
         name:@"BO2SteamLibraryPlay" object:nil];
-    UIButton *steam=[UIButton buttonWithType:UIButtonTypeSystem];
-    [steam setTitle:@"Install or verify game files" forState:UIControlStateNormal];
-    [steam addTarget:self action:@selector(steamInstall) forControlEvents:UIControlEventTouchUpInside];
-    [_menu addArrangedSubview:steam];
-    _status = [UILabel new];
-    _status.textColor = UIColor.whiteColor;
-    _status.numberOfLines = 0;
-    [_menu addArrangedSubview:_status];
-    [NSLayoutConstraint activateConstraints:@[
-        [_menu.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
-        [_menu.centerYAnchor constraintEqualToAnchor:self.view.centerYAnchor],
-        [_menu.widthAnchor constraintLessThanOrEqualToAnchor:self.view.safeAreaLayoutGuide.widthAnchor multiplier:.85]
-    ]];
+    [self updateSteamAccount:nil];
+    if (PreviousRunFailed()) _status.text = @"The last session ended unexpectedly. Its log was kept for review.";
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
@@ -347,9 +449,11 @@ static NSURL *GameDirectory(NSError **error) {
     [_installer begin];
 }
 - (void)updateSteamAccount:(NSNotification *)notification {
-    NSString *account=[BO2SteamSignIn accountName];
-    [_steamAccount setTitle:account.length ? [@"Steam account · " stringByAppendingString:account] : @"Sign in to Steam"
-        forState:UIControlStateNormal];
+    // Show only whether a session exists. The account name stays off the screen.
+    BOOL signedIn = [BO2SteamSignIn accountName].length > 0;
+    _steamAccount.configuration = signedIn
+        ? ChipLook(@"Steam · Signed in", @"checkmark.circle.fill", [UIColor colorWithRed:0.45 green:0.85 blue:0.5 alpha:1])
+        : ChipLook(@"Sign in to Steam", @"person.crop.circle", nil);
 }
 - (void)steamAccount {
     if (_installer || _started || _checking) return;
@@ -460,8 +564,18 @@ static NSURL *GameDirectory(NSError **error) {
         });
     }
     _started = YES;
+    if (_steamLaunch.personaName.length) setenv("BO2_NAME",_steamLaunch.personaName.UTF8String,1);
+    if (_steamLaunch) setenv("BO2_DW_TRACE","0",1);   // keep network payloads out of the saved log
+    BeginRunLog();
     UIView *surface = makeSurface(self.view.bounds);
     [self.view addSubview:surface];
+    // The launcher supplies the touch controls. Frameworks built before that
+    // carry their own copy, which is taken out so the two never both send input.
+    for (UIView *builtIn in surface.subviews.copy)
+        if ([NSStringFromClass(builtIn.class) isEqualToString:@"BO2TouchControls"]) [builtIn removeFromSuperview];
+    BO2TouchOverlay *touch = [[BO2TouchOverlay alloc] initWithFrame:self.view.bounds handle:handle mode:mode];
+    touch.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    if (touch) [self.view addSubview:touch];
     if (_server) {
         UILabel *notice=[UILabel new];
         notice.text=_wired ? @"Loading private match over USB…" : @"Loading private match over Wi-Fi…";
@@ -480,8 +594,10 @@ static NSURL *GameDirectory(NSError **error) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED,0), ^{
         int result = entry(sections.fileSystemRepresentation);
         if (self->_steamLaunch) NSLog(@"[steam-runtime] guest returned result=%d",result);
+        EndRunLog();
         dispatch_async(dispatch_get_main_queue(), ^{
             [self finishSteamLaunch];
+            [touch removeFromSuperview];
             [surface removeFromSuperview];
             self->_menu.hidden = NO;
             self->_status.text = [NSString stringWithFormat:@"%@ exited (%d). Reopen the app to start again.", Modes()[mode],result];
@@ -495,11 +611,16 @@ static NSURL *GameDirectory(NSError **error) {
 @end
 @implementation GameApp
 - (BOOL)application:(UIApplication *)app didFinishLaunchingWithOptions:(NSDictionary *)options {
+    // Game audio should play with the ring switch on silent, as other games do.
+    [AVAudioSession.sharedInstance setCategory:AVAudioSessionCategoryPlayback error:nil];
+    [AVAudioSession.sharedInstance setActive:YES error:nil];
     self.window = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.window.rootViewController = [ModePicker new];
     [self.window makeKeyAndVisible];
     return YES;
 }
+- (void)applicationDidEnterBackground:(UIApplication *)app { fflush(stderr); MarkRun(NO); }
+- (void)applicationWillEnterForeground:(UIApplication *)app { if (gRunning) MarkRun(YES); }
 @end
 int main(int argc,char **argv) {
     @autoreleasepool { return UIApplicationMain(argc,argv,nil,NSStringFromClass(GameApp.class)); }

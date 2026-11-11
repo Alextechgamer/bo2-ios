@@ -74,7 +74,7 @@ struct SteamSignInView: View {
 
     private func signedInSection(_ name: String) -> some View {
         Section {
-            LabeledContent("Account", value: name)
+            LabeledContent("Steam", value: "Signed in")
             Button("Sign out", role: .destructive) { steam.signOut() }
         } footer: {
             Text("Signing out removes the token from this device's Keychain.")

@@ -10,6 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface BO2SteamLaunch : NSObject
 @property(nonatomic, readonly) NSString *gameDirectory;
+@property(nonatomic, readonly) NSString *personaName;
 - (BOOL)installInHandle:(void *)handle;
 - (void)finish;
 @end

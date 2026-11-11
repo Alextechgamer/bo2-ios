@@ -891,6 +891,16 @@ class SteamSession {
             unsupportedIntegrityMessage = message.rawEMsg
             SteamLog.event("[steam-security] unsupported integrity service emsg=\(message.rawEMsg)")
             disconnect()
+        case EMsg.clientAccountInfo.rawValue:
+            // CMsgClientAccountInfo field 1 is the display name shown to other players.
+            var decoder = ProtobufDecoder(message.body)
+            while let tag = try? decoder.readTag() {
+                if tag.fieldNumber == 1, tag.wireType == .lengthDelimited {
+                    if let name = try? decoder.readString() { personaName = name }
+                    break
+                }
+                guard (try? decoder.skip(wireType: tag.wireType)) != nil else { break }
+            }
         case EMsg.clientLoggedOff.rawValue:
             SteamLog.trace("Received ClientLoggedOff")
             // An explicit server logoff is not a transient transport outage.

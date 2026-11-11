@@ -1,100 +1,191 @@
-# BO2 iOS launcher source
+<div align="center">
 
-This repository contains the UIKit launcher, Metal surface, touch controls, private server transport, and local packaging tools for an iOS adaptation of Black Ops II. Running the game requires a separately acquired licensed game installation, translated iOS mode frameworks, and their matching guest sections. Building the transport also requires the runtime shim headers, hook definitions and, for Multiplayer, a privately generated script index and bytecode.
+# bo2-ios
 
-## Build a personal package
+**Call of Duty: Black Ops II on an iPhone, as native ARM64 code.**<br>
+The statically recompiled game from [bo2-mac](https://github.com/adrbn/bo2-mac), carried to iOS: a UIKit launcher, a Metal surface, touch controls, native Steam sign-in and online multiplayer, built from your own Steam copy.
 
-Use macOS with Xcode, XcodeGen, Python 3.11 or later and an Apple development signing identity. Keep private inputs and build outputs in a separate directory.
+<a href="#install">Install</a> · <a href="#results">Results</a> · <a href="#how-it-works">How it works</a> · <a href="#limits">Limits</a> · <a href="#roadmap">Roadmap</a>
 
-1. Put each translated framework under `device/<mode>/<mode>.framework` in your build directory, and the associated `pe_sections.bin` under `conversion/boot_cache/<mode>/`. The mode names are `sps`, `mps` and `zms`.
-2. Supply a ZIP of your own installation with the game files at the archive root. With the owning Steam account signed in on the Mac, run `python3 ios/steam_receipt.py "$PRIVATE/SteamOwnership.plist"` to generate the private ownership receipt.
-3. Use the packaging command below with your build directory, archive, desired output and temporary work directory. Supply your own bundle identifier and development team. The script signs the app locally.
+![source: x86-32 Windows](https://img.shields.io/badge/source-x86--32%20Windows-ff6a00?style=flat-square&labelColor=0b0b0c)
+![target: ARM64 iOS 16+](https://img.shields.io/badge/target-ARM64%20iOS%2016%2B-ff6a00?style=flat-square&labelColor=0b0b0c)
+![renderer: D3D11 to Metal](https://img.shields.io/badge/renderer-D3D11%20%E2%86%92%20Metal-ff6a00?style=flat-square&labelColor=0b0b0c)
+![Steam: native sign-in](https://img.shields.io/badge/Steam-native%20sign--in-ff6a00?style=flat-square&labelColor=0b0b0c)
+![JIT: none](https://img.shields.io/badge/JIT-none-ff6a00?style=flat-square&labelColor=0b0b0c)
+![game files in this repository: none](https://img.shields.io/badge/game%20files-none-f4f1ea?style=flat-square&labelColor=0b0b0c)
+![status: experimental](https://img.shields.io/badge/status-experimental-f4f1ea?style=flat-square&labelColor=0b0b0c)
+
+<sub>[Abstract](#abstract) · [Controls](#controls) · [Repository](#repository) · [Legal](#legal)</sub><br>
+<sub>Experimental, 2026-11-10 · tried on one iPhone 17 Pro Max and the iOS 26 simulator</sub>
+
+</div>
+
+> [!IMPORTANT]
+> **This repository contains no game file and no translated game code.** It holds the launcher, the iOS glue and the
+> packaging tools. The game's code ends up inside the app you build, so nobody can hand you a ready-made one: each
+> player builds their own from their own Steam copy, and it may not be shared. Unofficial fan project, not affiliated
+> with Activision, Treyarch, Valve or Apple. To play, buy the game.
+
+---
+
+## Abstract
+
+[bo2-mac](https://github.com/adrbn/bo2-mac) turns the three executables of Black Ops II, the campaign (`t6sp.exe`),
+Zombies (`t6zm.exe`) and multiplayer (`t6mp.exe`), from 32-bit x86 Windows code into ARM64 code ahead of time, and
+links it with a hand-written Win32 runtime whose Direct3D 11 is drawn by Metal. There is no Wine and no JIT.
+
+bo2-ios is what that needs to run on a phone. Each mode becomes an iOS framework. One UIKit app loads the framework
+you pick, gives it a Metal view, and draws touch controls over it. The launcher signs in to Steam itself, with a
+password or a QR code and Steam Guard, and hands the game a real Steam identity, ownership answers and encrypted
+app tickets. With that, the stock game client reaches the official online service and joins public matches. A
+second transport joins LAN-mode private servers by address, over Wi-Fi or through a Mac over USB.
+
+Because iOS forbids JIT, the static translation is what makes this possible at all: the app is ordinary signed
+ARM64 code.
+
+## Results
+
+Everything below was observed once or a few times on the hardware named. Nothing here is a benchmark.
+
+| | observed | where |
+|---|---|---|
+| Steam sign-in | password and QR sign-in with Steam Guard; the session survives relaunch | iPhone and simulator |
+| Online multiplayer | the stock client reaches the lobby, finds a public match and plays it | iPhone and simulator |
+| Private multiplayer | Aftermath on a LAN-mode server: class selection, armed spawn, HUD | simulator, and iPhone over USB |
+| Private Zombies | TranZit on a LAN-mode server: active play with advancing snapshots | simulator, and iPhone over USB |
+| Sound and player name | game audio plays; the in-game name is the Steam display name | iPhone |
+| Touch controls | move stick, swipe look, pad buttons | iPhone, multiplayer only so far |
+
+**What you can play**
+
+<table>
+<tr>
+<td width="33%" valign="top"><b>Campaign</b><br>
+Starts locally from the launcher. Touch controls switch by hand with the Menu / Controls button.</td>
+<td width="33%" valign="top"><b>Multiplayer</b><br>
+<b>Play Online with Steam</b> for public matches with your own account, <b>Play Local</b>, or
+<b>Join Private Server</b>.</td>
+<td width="33%" valign="top"><b>Zombies</b><br>
+Starts locally, or joins a LAN-mode private server.</td>
+</tr>
+</table>
+
+## How it works
+
+1. **Translate.** bo2-mac's converter lifts your own executables with Remill and compiles them for
+   `arm64-apple-ios`. The output, one framework per mode plus its guest memory sections, stays on your Mac.
+2. **Glue.** [GameSurface.mm](ios/GameSurface.mm) gives each framework a `CAMetalLayer` view, a pointer and an input
+   queue. [PlutoniumLAN.cpp](ios/PlutoniumLAN.cpp) is the private-server transport and the in-game UI fix-ups that a
+   direct join needs.
+3. **Launch.** [FullGame.m](ios/FullGame.m) is the launcher: three mode cards, the Steam chip, private-server join,
+   and the code that loads a framework and starts the guest on its own thread.
+4. **Steam.** [SteamAuth/](ios/SteamAuth/) is the sign-in module adapted from
+   [iDeck](https://github.com/kuscholar/iDeck). [SteamServices/](ios/SteamServices/) keeps one authenticated
+   session for the owned library, encrypted app tickets, the game-server session and per-account save folders.
+   [SteamRuntimeProvider.mm](ios/SteamRuntimeProvider.mm) is the C table the game's Steam calls are answered from.
+5. **Touch.** [TouchOverlay.m](ios/TouchOverlay.m) lives in the launcher and reaches the loaded framework through
+   its exported input functions, so the controls change without relinking a framework.
+
+**The account is yours and stays on the phone.** The password is encrypted on the device for Steam and is not
+stored. The session token sits in the app's own Keychain item, this device only. The launcher shows only that a
+session exists, never the account name. Logs carry no token, ticket, account name or Steam ID.
+
+**Nothing is faked.** Tickets are issued by Steam for your account. If Steam asks the client to run one of its
+integrity modules, which this app cannot do, the session stops; no answer is made up.
+
+## Controls
+
+The game starts in **Menu**, where a tap is a mouse click. Multiplayer and Zombies switch to the on-screen controls
+when a match starts and back when it ends. The top-left button switches by hand, which Campaign always needs.
+
+| Control | Action |
+|---|---|
+| Left side of the screen | Move stick, appears under the thumb. Push fully forward to sprint. |
+| Right side of the screen | Swipe to look. The view follows the finger as it follows a mouse. |
+| FIRE, ADS | Shoot and aim. A swipe that starts on either keeps turning the view. |
+| JUMP, CROUCH, RELOAD, SWAP, KNIFE, FRAG, TAC | As labelled. RELOAD is also Use. |
+| II, SCORE, arrows | Pause, scoreboard, scorestreaks and in-match menus. JUMP confirms. |
+| Gear | Look method and speed, ADS **Hold** or **Tap**, **Edit layout**, **Reset layout**. |
+
+**Edit layout** lets you drag any pad anywhere and resize the selected one with the slider. The layout is saved on
+the phone. A hardware controller works at the same time.
+
+## Install
+
+The full walk-through is in [docs/INSTALL.md](docs/INSTALL.md). In short, on a Mac with Xcode, XcodeGen and
+Python 3.11 or later:
 
 ```sh
-python3 ios/package_game.py "$BUILD" "$GAME_ZIP" "$OUTPUT_IPA" "$WORK" \
-  --team "$DEVELOPMENT_TEAM" --bundle-id "$BUNDLE_ID" \
-  --receipt "$PRIVATE/SteamOwnership.plist"
+python3 ios/steam_receipt.py "$PRIVATE/SteamOwnership.plist"
 ```
-
-For **Join Private Server**, also pass `--lan-root "$LAN_BUILD"`. Under each of `mps/` and `zms/`, provide the LAN-capable mode framework and its `pluto_pe_sections.bin`. The launcher checks the server's challenge response, protocol, session mode and active-match flag. Choose your Multiplayer team and class in the game's menus. Use the D-pad and Jump/A to confirm, or set **Pad: Off** to tap the menu.
-
-## Steam account
-
-Choose **Sign in to Steam** in the launcher for account/password or QR sign-in with Steam Guard. The app stores the resulting session in its own device-local Keychain entry. Open **Steam account** to sign out. **Steam library** lists owned games and apps, with Play available only for packaged runtimes and installed files whose compatibility checks pass. Other owned titles remain visible as unavailable. Cancelling a refresh retains the last library for the same account and marks it stale.
-
-Native runtime integration delivers genuine encrypted app tickets and uses a separate anonymous Steam game-server session with genuine security-policy status. These are Steam connection milestones. Official game matchmaking, library downloads and cloud-save transfers are not verified yet.
-
-Packaging generates `RuntimeCatalog.json` from the final signed framework binaries and matching sections. Original Steam executable hashes are kept separate from unpacked build-input hashes. Downloads cannot launch unless the private build's `runtime-provenance.json` records a verified matching original-to-unpacked association; missing evidence disables that path. Campaign's Steam entry stays unavailable until its framework includes the native provider ABI. Existing receipt-based launcher buttons remain available.
-
-**Install or verify game files** opens the existing private library installer, which uses its own Steam OpenID authorization. The native sign-in module is adapted from iDeck at revision `2ac39beff91251d36f3ad6331d3f8402b3c10e18`. Its sources, GPL-3.0-or-later license, exception and attribution are in `ios/SteamAuth/`; built apps include the notices in `SteamAuthNotices`.
-
-## Host a private match
-
-On Windows, supply a private installation directory containing `Plutonium/bin/plutonium-bootstrapper-win32.exe`, the r5369 runtime and storage files, and your licensed installation under `game/`. These commands each start a dedicated process and print its PID. Supply the Windows host's LAN IPv4 address in `$env:SERVER_LAN_IP`.
-
-```powershell
-py -3 lan/serve_private.py aftermath $env:SERVER_LAN_IP --root $env:PRIVATE_INSTALL
-py -3 lan/serve_private.py tranzit $env:SERVER_LAN_IP --root $env:PRIVATE_INSTALL
-```
-
-Aftermath uses UDP port 24985 and TranZit uses UDP port 24988. Permit incoming traffic on the selected ports from the players' local network. In **Join Private Server**, choose the matching mode and enter the Windows host's LAN address and port. Each server writes its log inside the private installation directory.
-
-### Optional relay through a Mac
-
-Use this setup when the Windows game host is on a different network and the iPhone shares Wi-Fi with a Mac. The Mac and Windows host must be connected to the same Tailscale network. The iPhone only needs access to the Mac's Wi-Fi address.
-
-1. On Windows, start each required dedicated server bound to loopback, substituting `127.0.0.1` for `$env:SERVER_LAN_IP` in the commands above.
-2. On the Mac, start the gateway with its Wi-Fi interface address and subnet prefix, its Tailscale IPv4 address, and the Windows host's Tailscale IPv4 address. Permit UDP 24985 and 24988 from the Wi-Fi subnet and TCP 29489 from the Windows host over Tailscale.
-
-   ```sh
-   python3 lan/lan_tunnel.py gateway "$MAC_WIFI_CIDR" "$MAC_TAILNET_IP" "$WINDOWS_TAILNET_IP"
-   ```
-
-3. On Windows, run the forwarder and leave both bridge processes running while playing.
-
-   ```powershell
-   py -3 lan/lan_tunnel.py forward $env:MAC_TAILNET_IP
-   ```
-
-4. Join the Mac's Wi-Fi IPv4 address with the selected game port on the phone. The gateway accepts traffic from its configured Wi-Fi subnet and accepts a tunnel from the specified Windows peer. The forwarder sends the game packets to the loopback dedicated servers.
-
-### USB fallback for a Mac-connected iPhone
-
-When packaging the app, pass `--private-server "$GATEWAY_IP"` along with `--lan-root`. Choose the private LAN IPv4 address that the Mac can use to reach the game server. In the separate Mac relay setup above, use the Mac gateway's Wi-Fi address and keep both relay processes running.
-
-Plug one trusted iPhone into the Mac, then start the USB helper on the Mac with the same address.
 
 ```sh
-python3 lan/usb_join_fallback.py "$GATEWAY_IP"
+python3 ios/package_game.py "$BUILD" "$GAME_ZIP" "$OUTPUT_IPA" "$WORK" --team "$DEVELOPMENT_TEAM" --bundle-id "$BUNDLE_ID" --receipt "$PRIVATE/SteamOwnership.plist"
 ```
 
-In **Join Private Server**, use the configured address and the selected mode's standard port. The phone first sends a direct UDP query. If it times out, the phone opens a loopback control port and the helper uses the Mac's system usbmuxd service to forward the compatibility query. After a compatible reply, it forwards game packets over the cable. The launcher displays the selected transport while the match loads.
+`$BUILD` holds the translated frameworks and guest sections, which this repository does not contain. `$GAME_ZIP`
+is a ZIP of your own installation. Install the IPA from Xcode's Devices window, then sign in to Steam in the app.
 
-If the cable or stream drops during a match, the helper keeps the verified session for two minutes and reconnects the game stream on the same gateway socket. The launcher sends the join command 65 seconds after the mode starts and repeats it up to twice if the client state has not changed; pass `-BO2ConnectDelay <seconds>` or `-BO2MenuKeyDelay <seconds>` as launch arguments to adjust the waits. The reconnect and retry paths have not yet been exercised on a device.
+Hosting and joining private servers, the Mac relay, the USB fallback and the match verifiers are in
+[docs/PRIVATE-SERVERS.md](docs/PRIVATE-SERVERS.md).
 
-On the tested iPhone, the direct Wi-Fi query timed out. The USB path returned the compatibility reply, established the game connection and loaded the map. The private server recorded the client joining.
+## Limits
 
-## Touch controls
+- **You need the translated frameworks.** They come from bo2-mac's converter run for iOS on your own executables.
+  That step is not packaged here yet.
+- **Downloading the game from Steam inside the app is not implemented.** Game files come from the package or from
+  the private library installer. The Steam library screen lists what you own and what is playable.
+- **Steam Cloud saves are not synchronised.**
+- **Online play is unofficial.** The client cannot run Steam's anti-cheat modules. Whether using it puts an account
+  at risk is unknown.
+- **A dropped Steam connection ends online play until the app is reopened.** The session reconnects, but the game's
+  sockets do not.
+- **Two save locations.** Local modes and Steam sessions keep saves in different folders.
+- **Private servers over Wi-Fi timed out on the tested phone.** The USB path through a Mac works.
+- **Not yet tried:** Campaign and Zombies with the new touch controls, official Zombies, progress after a finished
+  public match, any iPhone other than the one named above.
+- **Free Apple IDs** sign an app for 7 days.
 
-With **Pad: On**, the left half of the screen is a move stick that appears under the thumb and sprints at full forward tilt. Swipe the right half to look; a swipe that starts on Fire, Aim or another right-hand pad keeps steering. The right-hand pads are Fire, Aim, Jump, Crouch, Use/Reload, Swap, Melee, Lethal and Tactical. Pause, Scoreboard and a D-pad sit at the top left. Set **Pad: Off** to tap menus directly. Pass `-BO2LookSensitivity <0.2–5>` as a launch argument to scale swipe speed. This layout has not yet been tried on a device.
+## Repository
 
-## Verify an instrumented two-player run
+| Path | What |
+|---|---|
+| [ios/FullGame.m](ios/FullGame.m) | Launcher: mode cards, Steam chip, private-server join, game start, run log |
+| [ios/TouchOverlay.m](ios/TouchOverlay.m) | Touch controls, look settings, layout editor |
+| [ios/GameSurface.mm](ios/GameSurface.mm) | Metal view, pointer and ownership bridge built into each mode framework |
+| [ios/PlutoniumLAN.cpp](ios/PlutoniumLAN.cpp) | LAN-mode private-server transport and in-game UI hooks |
+| [ios/SteamAuth/](ios/SteamAuth/) | Steam sign-in (password, QR, Steam Guard, Keychain), adapted from iDeck |
+| [ios/SteamServices/](ios/SteamServices/) | Shared Steam session, library, tickets, game-server session, save folders |
+| [ios/SteamRuntimeProvider.mm](ios/SteamRuntimeProvider.mm) | The provider table the game's Steam interface reads |
+| [ios/package_game.py](ios/package_game.py) | Builds and signs a personal IPA |
+| [lan/](lan/) | Private-server hosting, Mac relay, USB fallback, match verifiers |
+| [docs/](docs/) | [Install and play](docs/INSTALL.md), [private servers](docs/PRIVATE-SERVERS.md) |
 
-The offline verifiers read an existing `match.log`, `ios.jsonl.gz` and `windows.jsonl` in a private run directory. They require the staged event and snapshot records produced by the game test instrumentation. Ordinary server logs alone do not contain those records.
+The Git allowlist covers only these sources. Keep account receipts, signing material, server addresses, private
+libraries, compiled frameworks, archives and device reports outside the repository.
 
-Run `python3 lan/verify_pair.py "$PRIVATE_RUN"` for Aftermath or `python3 lan/verify_tranzit.py "$PRIVATE_RUN"` for Zombies. The Aftermath verifier checks observed movement, damage, kills and armed respawns. The Zombies verifier checks observed movement, zombie kills and reciprocal revives. Results print to the terminal.
+## Roadmap
 
-## Optional installation service
+1. Download owned game files from Steam inside the app, with resumable, verified installs.
+2. One save location per account, and Steam Cloud where the game uses it.
+3. Keep online play alive across a brief Steam reconnect.
+4. Enforce the runtime compatibility check on every way into a Steam session.
+5. Private-server joins over Wi-Fi and by host name.
+6. A documented, repeatable build from a Steam copy to a signed IPA.
 
-Stage only game files in a private directory named `steam-library`, next to the ownership receipt. Run the following commands to index the files and start the owner-restricted service.
+## Legal
 
-```sh
-python3 ios/index_library.py "$PRIVATE/steam-library" "$PRIVATE/steam-index.json"
-python3 ios/steam_install_server.py "$PRIVATE" "$TAILNET_HTTPS_ORIGIN" --port 8080
-```
+For a copy the user owns, on hardware the user owns.
 
-Expose the loopback service through the supplied tailnet HTTPS origin and pass the same origin to the packager with `--library-origin`. The service validates Steam OpenID sign-in against the account in the private receipt. The phone verifies each downloaded file against the supplied manifest.
+- No engine source and no leaked code are used.
+- Neither the input binaries nor the recompiled output are distributed. No game file is included: the player needs
+  their own Steam copy of Call of Duty: Black Ops II.
+- Steam sign-in uses the player's own account. Tickets are requested from Steam and passed on unchanged. No ticket,
+  ownership answer or anti-cheat reply is fabricated.
+- The Steam sign-in module is adapted from iDeck and is GPL-3.0-or-later, with its exception and notices in
+  [ios/SteamAuth/](ios/SteamAuth/); built apps carry the notices in `SteamAuthNotices`. The translated runtime
+  comes from bo2-mac, which is GPL-3.0.
 
-The Metal library compiler takes separately provided shader source files. The archive assembler takes a locally signed application shell and a private game ZIP, then verifies each file against the app's resource seal. Each tool accepts `--help`.
-
-The Git allowlist covers only the source files and this README. Keep account receipts, signing material, server addresses, private libraries, compiled frameworks, archives and device reports outside the repository.
+This is an unofficial fan project. Call of Duty and Black Ops are trademarks of Activision Publishing, Inc. Steam is
+a trademark of Valve Corporation. iPhone and iOS are trademarks of Apple Inc. This project is not affiliated with,
+endorsed by or sponsored by Activision, Treyarch, Valve or Apple. To play, buy the game.

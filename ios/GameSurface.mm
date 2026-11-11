@@ -3,9 +3,10 @@
 #import <mach/mach.h>
 #include <atomic>
 #include <cmath>
-#import "TouchControls.h"
 
-// Each mode framework owns its input queue and renderer. Install on the main
+// Each mode framework owns its input queue and renderer. The launcher draws
+// the touch controls over this view (TouchOverlay.m); a touch that reaches
+// this view is a mouse pointer event. Install on the main
 // thread before starting that mode's guest entry point on its worker thread.
 extern "C" void ios_game_event(uint32_t message, uint32_t buttons, uint32_t location);
 static std::atomic<double> cursorX{0}, cursorY{0};
@@ -51,22 +52,13 @@ extern "C" void ios_cursor_set(double x, double y) {
     NSTimer *_timer;
     uint64_t _lastFrames;
     CFTimeInterval _lastTime;
-    BO2TouchControls *_controls;
 }
 + (Class)layerClass { return CAMetalLayer.class; }
 - (void)didMoveToWindow {
     [super didMoveToWindow];
     [_timer invalidate];
     _timer = nil;
-    if (!self.window) {
-        [_controls resetInput];
-        return;
-    }
-    if (!_controls) {
-        _controls = [[BO2TouchControls alloc] initWithFrame:self.bounds];
-        _controls.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [self addSubview:_controls];
-    }
+    if (!self.window) return;
     if (!_stats) {
         _stats = [UILabel new];
         _stats.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold];

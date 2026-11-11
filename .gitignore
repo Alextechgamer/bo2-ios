@@ -1,6 +1,9 @@
 *
 !/.gitignore
 !/README.md
+!/docs/
+!/docs/INSTALL.md
+!/docs/PRIVATE-SERVERS.md
 !/ios/
 !/ios/FullGame.m
 !/ios/GameSurface.mm
@@ -21,7 +24,8 @@
 !/ios/SteamRuntimeProvider.mm
 !/ios/SteamRuntimeCalls.h
 !/ios/SteamGuestCallbacks.h
-!/ios/TouchControls.h
+!/ios/TouchOverlay.h
+!/ios/TouchOverlay.m
 !/ios/assemble_full.py
 !/ios/build_shader_library.py
 !/ios/index_library.py
