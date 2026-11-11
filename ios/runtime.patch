@@ -1,0 +1,2198 @@
+diff -ruN a/runtime/gfx/metal_backend.mm b/runtime/gfx/metal_backend.mm
+--- a/runtime/gfx/metal_backend.mm	2026-11-11 09:30:02
++++ b/runtime/gfx/metal_backend.mm	2026-11-06 21:41:50
+@@ -19,14 +19,14 @@
+ // guest runs. Step 2 will feed it the real vertex/index/texture data the software
+ // capture (BO2_GEO_DUMP) already decodes correctly out of guest memory.
+ 
+-#import <Cocoa/Cocoa.h>
++#import <UIKit/UIKit.h>
+ #import <ImageIO/ImageIO.h>
+ #import <Metal/Metal.h>
+ #include <sys/stat.h>
+ #include <sys/time.h>
+ #include <mach/mach.h>
+-#include <IOKit/IOKitLib.h>
+ #include "../win32/bo2_getenv.h"
++#include "../win32/guest_monitor.h"
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <cerrno>
+@@ -42,6 +42,7 @@
+ #import <simd/simd.h>
+ 
+ #include <atomic>
++#include <future>
+ #include <cstdio>
+ // The guest memory accessor lives in the win32 shim; this file does not include
+ // its header, so declare the single function [FRAME-HANDSHAKE] needs.
+@@ -101,9 +102,10 @@
+ #include <unordered_set>
+ #include <vector>
+ 
++extern "C" UIView *ios_game_view(void);
+ namespace {
+ 
+-NSWindow*                  g_window = nil;
++UIWindow *g_window = nil;
+ static const bool          g_titre_nu = [] { const char* e = bo2_getenv("BO2_TITRE"); return e && !strcmp(e, "0"); }();
+ CAMetalLayer*              g_layer  = nil;
+ id<MTLDevice>              g_device = nil;
+@@ -196,10 +198,10 @@
+ std::mutex               g_ui_mu;
+ std::vector<UiVert>      g_ui_verts;      // last complete frame, guest-side order
+ std::vector<UiBatch>     g_ui_batches;
+-float                    g_ui_vw = 1920.f, g_ui_vh = 1080.f;
++float                    g_ui_vw = kGuestMonitorW, g_ui_vh = kGuestMonitorH;
+ // The backbuffer size the DXGI shim advertises to the guest. Screen
+ // viewports are expressed in it and have to be mapped onto the drawable.
+-float                    g_guest_bb_w = 1920.f, g_guest_bb_h = 1080.f;
++float                    g_guest_bb_w = kGuestMonitorW, g_guest_bb_h = kGuestMonitorH;
+ bool                     g_ui_ready = false;
+ uint64_t                 g_ui_frames = 0;
+ 
+@@ -301,6 +303,44 @@
+     }
+ }
+ 
++struct IOSShaderBatch {
++    std::vector<ShaderStage> shaders;
++    std::vector<id<MTLFunction>> functions;
++    std::vector<std::string> errors;
++};
++static void ios_compile_batch(IOSShaderBatch& batch) {
++    static id<MTLLibrary> bundled = [] {
++        NSURL* url = [NSBundle.mainBundle URLForResource:@"BO2Shaders" withExtension:@"metallib"];
++        return url ? [g_device newLibraryWithURL:url error:nil] : nil;
++    }();
++    const size_t n=batch.shaders.size();
++    batch.functions.resize(n); batch.errors.resize(n);
++    std::vector<size_t> missing;
++    std::vector<const std::string*> sources;
++    for (size_t i=0; i<n; ++i) {
++        auto& source=batch.shaders[i].msl;
++        auto hash=msl_fnv64(source);
++        NSString* name=[NSString stringWithFormat:@"bo2_%016llx", (unsigned long long)hash];
++        if (bundled) batch.functions[i]=[bundled newFunctionWithName:name];
++        if (batch.functions[i]) { ++g_msl_from_cache; continue; }
++        if (bo2_env_on("BO2_CAPTURE_MSL")) {
++            NSURL* dir=[[[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject URLByAppendingPathComponent:@"BO2ShaderSources"];
++            [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
++            NSString* leaf=[NSString stringWithFormat:@"%016llx.msl",(unsigned long long)hash];
++            [@(source.c_str()) writeToURL:[dir URLByAppendingPathComponent:leaf] atomically:YES encoding:NSUTF8StringEncoding error:nil];
++        }
++        missing.push_back(i); sources.push_back(&source);
++    }
++    if (!missing.empty()) {
++        std::vector<id<MTLFunction>> out(missing.size());
++        std::vector<std::string> errors(missing.size());
++        msl_compile(sources.data(),sources.size(),out.data(),errors.data());
++        for (size_t j=0; j<missing.size(); ++j) {
++            batch.functions[missing[j]]=out[j]; batch.errors[missing[j]]=std::move(errors[j]);
++        }
++    }
++}
++
+ // Au lancement, en tâche de fond pendant le menu : les shaders des parties précédentes qui n'ont pas de metallib
+ // (msl_cache/<h>.msl seul) sont compilés par lots ; la pompe les prend ici au lieu de les compiler au chargement de la
+ // carte. Lot = h % kMslSeaux, trié : la partie suivante soumet les mêmes sources, que le cache Metal de macOS rend en
+@@ -423,10 +463,11 @@
+     const bool bc1 = (dxgi >= 70 && dxgi <= 72);
+     const bool bc2 = (dxgi >= 73 && dxgi <= 75);
+     const bool bc3 = (dxgi >= 76 && dxgi <= 78);
++    const bool bc4 = (dxgi >= 79 && dxgi <= 81);
+     const bool bc5 = (dxgi >= 82 && dxgi <= 84);
+-    if (!bc1 && !bc2 && !bc3 && !bc5) return false;
++    if (!bc1 && !bc2 && !bc3 && !bc4 && !bc5) return false;
+     const uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+-    const uint32_t blockBytes = bc1 ? 8u : 16u;
++    const uint32_t blockBytes = (bc1 || bc4) ? 8u : 16u;
+     if ((uint64_t)bw * bh * blockBytes > srcBytes) return false;
+     rgba.assign((size_t)w * h * 4, 0);
+     for (uint32_t by = 0; by < bh; by++) {
+@@ -445,6 +486,9 @@
+                 bo2_bc_color_block(blk + 8, px, false);
+                 bo2_bc_alpha_block(blk, al);
+                 for (int i = 0; i < 16; i++) px[i][3] = al[i];
++            } else if (bc4) {
++                bo2_bc_alpha_block(blk, al);
++                for (int i = 0; i < 16; ++i) { px[i][0] = al[i]; px[i][3] = 255; }
+             } else {                      // BC5: two BC4 channels -> R,G
+                 uint8_t rr[16], gg[16];
+                 bo2_bc_alpha_block(blk, rr);
+@@ -464,6 +508,34 @@
+     return true;
+ }
+ 
++// Decode D3D compressed images before allocating iOS Metal textures.
++static bool ios_native_bc = false;
++static bool ios_expand_texture(TexStage& t) {
++    std::vector<uint8_t> output, pixels, packed;
++    std::vector<uint32_t> offsets, pitches;
++    const unsigned slices = std::max(t.depth, t.faces);
++    for (unsigned slice = 0; slice < slices; ++slice) {
++        for (unsigned mip = 0; mip < t.mips; ++mip) {
++            const unsigned i = slice * t.mips + mip;
++            const unsigned w = std::max(1u, t.w >> mip), h = std::max(1u, t.h >> mip);
++            const unsigned rows = (h + 3) / 4;
++            const unsigned row = ((w + 3) / 4) * ((t.fmt <= 72 || t.fmt == 80 || t.fmt == 81) ? 8 : 16);
++            const size_t pitch = t.mip_pitch.empty() ? t.pitch : t.mip_pitch.at(i);
++            const size_t offset = t.mip_off.empty() ? slice * (t.slice_pitch ? t.slice_pitch : pitch * rows) : t.mip_off.at(i);
++            if (pitch < row || offset + (rows - 1) * pitch + row > t.bytes.size()) return false;
++            packed.resize(size_t(rows) * row);
++            for (unsigned y = 0; y < rows; ++y)
++                memcpy(packed.data() + size_t(y)*row, t.bytes.data() + offset + y*pitch, row);
++            if (!bo2_bc_decode(t.fmt, packed.data(), packed.size(), w, h, pixels)) return false;
++            offsets.push_back(output.size()); pitches.push_back(w*4);
++            output.insert(output.end(), pixels.begin(), pixels.end());
++        }
++    }
++    t.bytes.swap(output); t.mip_off.swap(offsets); t.mip_pitch.swap(pitches);
++    t.fmt = 28; t.pitch = t.w*4; t.slice_pitch = t.pitch*t.h;
++    return true;
++}
++
+ static const uint32_t kBcMipMin = 128;
+ // BO2_BCMIPS=1 turns on decoding block-compressed textures to RGBA8 so they can
+ // carry a mip chain. Off by default: it costs 4-8x memory on those textures.
+@@ -810,7 +882,7 @@
+     auto it = g_depth_tex.find(k);
+     if (it != g_depth_tex.end()) return it->second;
+     MTLTextureDescriptor* dd = [MTLTextureDescriptor
+-        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
++        texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                      width:w height:h mipmapped:NO];
+     dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+     dd.storageMode = MTLStorageModePrivate;
+@@ -852,7 +924,7 @@
+     if (!w || !h) return nullptr;
+     ProfDsv& p = g_prof_dsv[res];
+     if (!p.tex || p.tex.width != w || p.tex.height != h) {   // first attachment, or the id reused at another size
+-        MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
++        MTLTextureDescriptor* dd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                                                                    width:w height:h mipmapped:NO];
+         dd.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+         dd.storageMode = MTLStorageModePrivate;
+@@ -890,14 +962,10 @@
+     }
+ }
+ 
+-static Pochoir& pochoir_for(uint32_t res, uint32_t w, uint32_t h) {
++static Pochoir& pochoir_for(uint32_t res, uint32_t w, uint32_t h, id<MTLTexture> depth) {
+     Pochoir& p = g_pochoir[((uint64_t)res << 32) | ((uint64_t)w << 16) | h];
+-    if (!p.tex) {
+-        MTLTextureDescriptor* sd = [MTLTextureDescriptor
+-            texture2DDescriptorWithPixelFormat:MTLPixelFormatStencil8 width:w height:h mipmapped:NO];
+-        sd.usage = MTLTextureUsageRenderTarget;
+-        sd.storageMode = MTLStorageModePrivate;
+-        p.tex = [g_device newTextureWithDescriptor:sd];
++    if (p.tex != depth) {
++        p.tex = depth;
+         auto v = g_pochoir_val.find(res);
+         if (v != g_pochoir_val.end()) p.efface = v->second;
+         fprintf(stderr, "[POCHOIR] tampon Stencil8 ressource=%08x %ux%u %s\n", res, w, h, p.tex ? "cree" : "ECHEC");
+@@ -1694,6 +1762,34 @@
+ }
+ // Encode one already-described draw into an open render pass. Split out of the
+ // pump so the same code serves every render target.
++// New materials can introduce a pipeline variant mid-frame when firing or turning.
++struct IOSPipelineResult {
++    uint64_t key;
++    id<MTLRenderPipelineState> pipeline;
++    NSError* error;
++};
++static std::mutex pipelineResultLock;
++static std::vector<IOSPipelineResult> completedPipelines;
++static std::unordered_set<uint64_t> pendingPipelines;
++static std::unordered_map<uint64_t, double> retryPipelineAfter;
++static void collect_pipelines() {
++    std::vector<IOSPipelineResult> done;
++    { std::lock_guard<std::mutex> lock(pipelineResultLock); done.swap(completedPipelines); }
++    for (const auto& result : done) {
++        pendingPipelines.erase(result.key);
++        if (result.pipeline) {
++            g_pipe_cache[result.key] = result.pipeline;
++            ++g_pipe_built;
++        } else {
++            ++g_pipe_failed;
++            if ([result.error.localizedDescription localizedCaseInsensitiveContainsString:@"interrupted"])
++                retryPipelineAfter[result.key] = CACurrentMediaTime()+1;
++            else g_pipe_cache[result.key] = nil;
++            if (g_pipe_failed<=5) NSLog(@"BO2 pipeline: %@", result.error.localizedDescription);
++        }
++    }
++}
++static std::unordered_set<uint32_t> ios_requested_shaders;
+ void encode_real_draw(id<MTLRenderCommandEncoder> enc2, RealDrawRec& r,
+                       MTLPixelFormat target_fmt, MTLPixelFormat st_fmt) {
+     const ShaderRec* ps_rec = nullptr;
+@@ -1701,6 +1797,8 @@
+ 
+                 auto vsit = g_shader_rec.find(r.vs), psit = g_shader_rec.find(r.ps);
+                 if (vsit == g_shader_rec.end() || psit == g_shader_rec.end()) {
++                    if (vsit == g_shader_rec.end() && r.vs) ios_requested_shaders.insert(r.vs);
++                    if (psit == g_shader_rec.end() && r.ps) ios_requested_shaders.insert(r.ps);
+                     (g_real_skipped++, g_skip_why[0]++); return;
+                 }
+                 uint64_t key = ((uint64_t)r.vs << 32) ^ (uint64_t)r.ps ^
+@@ -1710,9 +1808,17 @@
+                                (blend_key(r.blend) * 0xC2B2AE3D27D4EB4Full) ^
+                                ((uint64_t)st_fmt * 0x94D049BB133111EBull);   // Invalid = 0: key unchanged
+                 id<MTLRenderPipelineState> pipe = nil;
++                auto retry = retryPipelineAfter.find(key);
++                if (retry != retryPipelineAfter.end()) {
++                    if (CACurrentMediaTime() < retry->second) return;
++                    retryPipelineAfter.erase(retry);
++                }
+                 auto pit = g_pipe_cache.find(key);
+                 if (pit != g_pipe_cache.end()) pipe = pit->second;
+                 else {
++                    if (pendingPipelines.count(key) || pendingPipelines.size() >= 12) {
++                        ++g_real_skipped; ++g_skip_why[3]; return;
++                    }
+                     MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
+                     int mapped = 0;
+                     bool used_slot[kMaxVBStreams] = {false};
+@@ -1903,24 +2009,14 @@
+                     // MUST match the pass. Metal validates this: a pipeline with
+                     // MTLPixelFormatInvalid here cannot be used in a pass that has
+                     // a depth attachment, and vice versa.
+-                    pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
++                    pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+                     pd.stencilAttachmentPixelFormat = st_fmt;   // Invalid (the descriptor's default) outside a stencil pass
+-                    NSError* pe = nil;
+-                    const double tp0 = CACurrentMediaTime();
+-                    pipe = [g_device newRenderPipelineStateWithDescriptor:pd error:&pe];
+-                    g_win_pipes++; g_win_pipe_ms += (CACurrentMediaTime() - tp0) * 1000.0;
+-                    g_pipe_cache[key] = pipe;
+-                    if (pipe) {
+-                        if (++g_pipe_built <= 5 || g_pipe_built % 50 == 0)
+-                            fprintf(stderr, "[gfx] pipeline #%llu built (vs=%08x ps=%08x, "
+-                                            "%d attrs, stride %u)\n",
+-                                    (unsigned long long)g_pipe_built, r.vs, r.ps,
+-                                    mapped, r.vb_stride);
+-                    } else if (++g_pipe_failed <= 5) {
+-                        fprintf(stderr, "[gfx] pipeline FAILED vs=%08x ps=%08x: %s\n",
+-                                r.vs, r.ps,
+-                                pe ? [[pe localizedDescription] UTF8String] : "?");
+-                    }
++                    pendingPipelines.insert(key);
++                    ++g_win_pipes;
++                    [g_device newRenderPipelineStateWithDescriptor:pd completionHandler:^(id<MTLRenderPipelineState> built, NSError* error) {
++                        std::lock_guard<std::mutex> lock(pipelineResultLock);
++                        completedPipelines.push_back({key, built, error});
++                    }];
+                 }
+                 if (!pipe) { (g_real_skipped++, g_skip_why[3]++); return; }
+                 // BO2_UI_PSSKIP=<hex ps> — DIAGNOSTIC: drop every draw using that
+@@ -1967,8 +2063,8 @@
+                             if (pv[1] < y0) y0 = pv[1];
+                             if (pv[1] > y1) y1 = pv[1];
+                         }
+-                        float vw = r.vp[2] > 1.f ? r.vp[2] : 1920.f;
+-                        float vh = r.vp[3] > 1.f ? r.vp[3] : 1080.f;
++                        float vw = r.vp[2] > 1.f ? r.vp[2] : kGuestMonitorW;
++                        float vh = r.vp[3] > 1.f ? r.vp[3] : kGuestMonitorH;
+                         if (seen >= 3 && (x1 - x0) > 0.7f * vw && (y1 - y0) > 0.7f * vh) {
+                             static uint64_t nhw = 0;
+                             if (++nhw == 1 || (nhw % 4000) == 0)
+@@ -2343,7 +2439,7 @@
+                         bool ok = (want_dim == 3 && have == MTLTextureType3D) ||
+                                   (want_dim == 4 && have == MTLTextureTypeCube) ||
+                                   (want_dim == 5 && have == MTLTextureType2D &&
+-                                   [bound pixelFormat] == MTLPixelFormatDepth32Float);
++                                   [bound pixelFormat] == MTLPixelFormatDepth32Float_Stencil8);
+                         if (!ok) {
+                             g_tx_wrongtype++;
+                             if (want_dim == 3) g_tx_wt3d++;
+@@ -2809,6 +2905,11 @@
+ 
+ // Open the window. MUST be called from the real process main thread.
+ extern "C" bool gfx_window_open(int width, int height) {
++    if (!NSThread.isMainThread) {
++        __block bool result;
++        dispatch_sync(dispatch_get_main_queue(), ^{ result = gfx_window_open(width, height); });
++        return result;
++    }
+     if (g_open.load()) return true;
+     // BO2_SHOT wiring. SIGUSR1 is the on-demand trigger, so a long run can be
+     // photographed at any moment from the outside without restarting it.
+@@ -2833,6 +2934,8 @@
+     }
+     @autoreleasepool {
+         g_device = MTLCreateSystemDefaultDevice();
++        if (@available(iOS 16.4, *)) ios_native_bc = g_device.supportsBCTextureCompression;
++        fprintf(stderr, "[iOS] Native BC textures: %d\n", ios_native_bc);
+         if (!g_device) {
+             fprintf(stderr, "[gfx] no Metal device available\n");
+             return false;
+@@ -2842,72 +2945,10 @@
+ 
+         // A plain executable is not a bundled .app; Regular activation policy is
+         // what lets it own a real window and take focus anyway.
+-        [NSApplication sharedApplication];
+-        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+-
+-        // A REAL APP, not a process called "boot". Without a main menu AppKit
+-        // labels the menu bar with the executable name and gives the window no
+-        // standard shortcuts at all — no Cmd+F, no Cmd+M, no Cmd+Q. Building one
+-        // is pure setup at startup: it runs once, before the guest starts, and
+-        // costs exactly nothing per frame.
+-        {
+-            // The menu-bar name comes from the PROCESS name, not from the menu's
+-            // title — with no .app bundle AppKit uses argv[0], which is why it
+-            // said "boot". setProcessName is the documented way to change it.
+-            NSString* appName = @"Black Ops II";
+-            [[NSProcessInfo processInfo] setProcessName:appName];
+-            NSMenu* bar = [[NSMenu alloc] init];
+-            NSMenuItem* appItem = [[NSMenuItem alloc] init];
+-            [bar addItem:appItem];
+-            NSMenu* appMenu = [[NSMenu alloc] initWithTitle:appName];
+-            [appMenu addItemWithTitle:@"Native ARM64 · static recompilation"
+-                               action:nil keyEquivalent:@""];
+-            [appMenu addItem:[NSMenuItem separatorItem]];
+-            [[appMenu addItemWithTitle:@"Hide"
+-                                action:@selector(hide:) keyEquivalent:@"h"]
+-                setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+-            [[appMenu addItemWithTitle:[@"Quit " stringByAppendingString:appName]
+-                                action:@selector(terminate:) keyEquivalent:@"q"]
+-                setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+-            [appItem setSubmenu:appMenu];
+-
+-            NSMenuItem* viewItem = [[NSMenuItem alloc] init];
+-            [bar addItem:viewItem];
+-            NSMenu* viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
+-            // Cmd+F for full screen, next to the standard Cmd+Ctrl+F that
+-            // toggleFullScreen: already answers.
+-            [[viewMenu addItemWithTitle:@"Enter Full Screen"
+-                                 action:@selector(toggleFullScreen:) keyEquivalent:@"f"]
+-                setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+-            [[viewMenu addItemWithTitle:@"Minimise"
+-                                 action:@selector(performMiniaturize:) keyEquivalent:@"m"]
+-                setKeyEquivalentModifierMask:NSEventModifierFlagCommand];
+-            [viewItem setSubmenu:viewMenu];
+-            [NSApp setMainMenu:bar];
+-        }
+-
+-        NSRect frame = NSMakeRect(0, 0, width, height);
+-        g_window = [[NSWindow alloc]
+-            initWithContentRect:frame
+-                      styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+-                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+-                        backing:NSBackingStoreBuffered
+-                          defer:NO];
+-        // FullScreenPrimary is what makes the green button and toggleFullScreen:
+-        // give a real Space rather than just zooming the window.
+-        [g_window setCollectionBehavior:(NSWindowCollectionBehaviorFullScreenPrimary |
+-                                         [g_window collectionBehavior])];
+-        // BO2_TITRE=0 (Black Ops II.app) : titre nu, sans les compteurs de mesure.
+-#if defined(BO2_TARGET_MPS)
+-        [g_window setTitle:g_titre_nu ? @"Call of Duty: Black Ops II - Multiplayer" : @"Call of Duty: Black Ops II — native ARM64"];
+-#elif defined(BO2_TARGET_ZMS)
+-        [g_window setTitle:g_titre_nu ? @"Call of Duty: Black Ops II - Zombies" : @"Call of Duty: Black Ops II — native ARM64"];
+-#else
+-        [g_window setTitle:g_titre_nu ? @"Call of Duty: Black Ops II" : @"Call of Duty: Black Ops II — native ARM64"];
+-#endif
+-        [g_window center];
+-
+-        g_layer = [CAMetalLayer layer];
++        UIView *view = ios_game_view();
++        if (!view || !view.window) return false;
++        g_window = view.window;
++        g_layer = (CAMetalLayer *)view.layer;
+         g_layer.device          = g_device;
+         g_layer.pixelFormat     = MTLPixelFormatBGRA8Unorm;
+         // BO2_UI_PROBEPIX=1 needs to READ the drawable back. Looking at a
+@@ -2923,13 +2964,8 @@
+         g_layer.framebufferOnly = NO;
+         g_layer.drawableSize    = CGSizeMake(width, height);
+         // Plein écran 16:10 d'une image 16:9 : les bandes montraient le fond blanc de la fenêtre (vu par le testeur 10-21).
+-        g_layer.backgroundColor = CGColorGetConstantColor(kCGColorBlack);
+-        [g_window setBackgroundColor:[NSColor blackColor]];
++        view.backgroundColor = UIColor.blackColor;
+ 
+-        NSView* view = [g_window contentView];
+-        [view setWantsLayer:YES];
+-        [view setLayer:g_layer];
+-
+         // Textured-quad pipeline, compiled from source at startup (no offline
+         // shader toolchain in this build).
+         NSError* err = nil;
+@@ -3087,7 +3123,7 @@
+             // A shadow map stand-in must read as FULLY LIT (depth 1.0 = nothing
+             // occludes), not 0 — a zeroed shadow map shadows the entire world.
+             MTLTextureDescriptor* dd = [MTLTextureDescriptor
+-                texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
++                texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+                                              width:1 height:1 mipmapped:NO];
+             dd.usage = MTLTextureUsageShaderRead;
+             dd.storageMode = MTLStorageModePrivate;   // depth textures cannot be Shared here
+@@ -3141,11 +3177,7 @@
+                     g_nulldepth ? "ok" : "FAILED");
+         }
+ 
+-        [g_window makeKeyAndOrderFront:nil];
+-        [NSApp activateIgnoringOtherApps:YES];
+-        [NSApp finishLaunching];
+-
+-        if (NSInteger hz = [[g_window screen] maximumFramesPerSecond]; hz > 0) g_refresh_hz.store((double)hz);
++        g_refresh_hz.store(g_window.screen.maximumFramesPerSecond);
+         g_open.store(true);
+         fprintf(stderr, "[gfx] Metal window %dx%d on %s, écran %.0f Hz\n", width, height,
+                 [[g_device name] UTF8String], g_refresh_hz.load());
+@@ -3159,38 +3191,7 @@
+ // muets (thermalState=0 pendant tout un effondrement), d'où la lecture directe. Clés relevées sur ce M1 :
+ // TCMz = la plus chaude des sondes CPU, F0Ac = vitesse réelle du ventilateur. Relevé dans present_report (2 s).
+ static double g_smc_cpu_c = 0.0, g_smc_ventilo = 0.0;
+-static double smc_lire(const char* k) {
+-    struct Cle {
+-        uint32_t key;
+-        struct { char major, minor, build, reserved; uint16_t release; } vers;
+-        struct { uint16_t version, length; uint32_t cpu, gpu, mem; } plimit;
+-        struct { uint32_t size, type; char attr; } info;
+-        char result, status, data8;
+-        uint32_t data32;
+-        unsigned char bytes[32];
+-    };
+-    static io_connect_t conn = 0;
+-    static bool essaye = false;
+-    if (!essaye) {
+-        essaye = true;
+-        io_service_t s = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching("AppleSMC"));
+-        if (s) { IOServiceOpen(s, mach_task_self(), 0, &conn); IOObjectRelease(s); }
+-    }
+-    if (!conn) return 0.0;
+-    auto appel = [](Cle* in, Cle* out) {
+-        size_t n = sizeof *out;
+-        return IOConnectCallStructMethod(conn, 2, in, sizeof *in, out, &n) == kIOReturnSuccess && !out->result;
+-    };
+-    Cle in = {}, out = {};
+-    in.key = (uint32_t)k[0] << 24 | (uint32_t)k[1] << 16 | (uint32_t)k[2] << 8 | (uint32_t)k[3];
+-    in.data8 = 9;                                         // descripteur de la clé
+-    if (!appel(&in, &out) || out.info.size != 4) return 0.0;
+-    in.info.size = 4; in.data8 = 5;                       // ses octets : un float ('flt ') sur ce M1
+-    out = {};
+-    if (!appel(&in, &out)) return 0.0;
+-    float f; memcpy(&f, out.bytes, 4);
+-    return f;
+-}
++static double smc_lire(const char*) { return 0; } // SMC sensors are desktop-only.
+ 
+ // Refresh the title-bar HUD, at most twice a second. Main thread only (the pump
+ // is the main thread, so no dispatch is needed). Rates are measured over the
+@@ -3221,7 +3222,6 @@
+              g_pipe_failed ? "  |  PIPE FAILURES" : "",
+              g_rd_drop_recs ? "  |  DRAWS DROPPED" : "",
+              chaleur);
+-    if (!g_titre_nu) [g_window setTitle:[NSString stringWithUTF8String:buf]];
+     // AND PUT THE TWO RATES IN THE LOG. "It used to be perfectly fluid and now it
+     // stutters" is a real regression report and there was no way to answer it
+     // from a log: the only place the frame rates existed was a window title
+@@ -3771,123 +3771,8 @@
+     }
+ }
+ 
+-uint32_t vk_from_event(NSEvent* e) {
+-    uint32_t vk = vk_from_keycode([e keyCode]);
+-    if (vk) return vk;
+-    NSString* s = [e charactersIgnoringModifiers];
+-    if ([s length] == 0) return 0;
+-    unichar c = [s characterAtIndex:0];
+-    if (c >= 'a' && c <= 'z') return (uint32_t)(c - 'a' + 'A');
+-    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return (uint32_t)c;
+-    return 0;
+-}
+-
+-// Client-relative mouse position, packed the way lParam wants it. The window is
+-// the drawable, so "client" is the content view in flipped (top-left) space.
+-uint32_t mouse_lparam(NSEvent* e) {
+-    if (!g_window) return 0;
+-    NSPoint p = [e locationInWindow];
+-    NSView* v = [g_window contentView];
+-    NSPoint c = [v convertPoint:p fromView:nil];
+-    int x = (int)c.x, y = (int)(v.bounds.size.height - c.y);   // flip to Win32
+-    if (x < 0) x = 0; if (y < 0) y = 0;
+-    return ((uint32_t)(y & 0xffff) << 16) | (uint32_t)(x & 0xffff);
+-}
+-
+-// Translate one AppKit event. Returns true when the event was consumed as game
+-// input and must NOT also go to AppKit (key events, so the system does not beep
+-// at every unhandled keypress).
+-bool in_translate(NSEvent* e) {
+-    switch ([e type]) {
+-        case NSEventTypeKeyDown: {
+-            uint32_t vk = vk_from_event(e);
+-            if (!vk) return false;
+-            // bit 30 = "key was already down": the engine uses it for repeat.
+-            in_push(0x0100, vk, [e isARepeat] ? 0x40000001u : 0x00000001u);
+-            NSString* ch = [e characters];
+-            if ([ch length]) {
+-                unichar c = [ch characterAtIndex:0];
+-                // TranslateMessage donne aussi un WM_CHAR aux touches de contrôle : Retour arrière 0x08
+-                // (AppKit dit 0x7F), Entrée 0x0D, Tab 0x09, Échap 0x1B. Sans 0x08, aucun champ de texte
+-                // ne s'efface (nom de classe, 10-21).
+-                if (c == 0x7f) c = 0x08;
+-                if ((c >= 0x20 && c < 0x7f) || c == 0x08 || c == 0x0D || c == 0x09 || c == 0x1B)
+-                    in_push(0x0102, c, 1);   // WM_CHAR
+-            }
+-            return true;
+-        }
+-        case NSEventTypeKeyUp: {
+-            uint32_t vk = vk_from_event(e);
+-            if (!vk) return false;
+-            in_push(0x0101, vk, 0xC0000001u);
+-            return true;
+-        }
+-        // ── MODIFIERS. Ctrl = crouch and Shift = sprint, and NEITHER HAS EVER
+-        // WORKED IN THIS PORT, because AppKit does not deliver them as KeyDown
+-        // or KeyUp at all: a modifier is an NSEventTypeFlagsChanged event, and
+-        // this switch had no case for it, so the events fell through to
+-        // `[NSApp sendEvent:]` and the guest never saw a thing.
+-        //
+-        // Found 2026-08-14 while the tester was looking for a key to descend and I
+-        // was listing Ctrl and Shift as things to try — they could not have
+-        // worked. ⚠️ The failure is silent and total, and it looks exactly like
+-        // "the engine ignores crouch", which is the same shape as the four runs
+-        // lost to BO2_KEYPIPE's absence.
+-        //
+-        // FlagsChanged carries no up/down flag, only the new modifier mask, so
+-        // the transition has to be derived by comparing against the previous
+-        // mask. Each modifier is tracked separately: pressing Shift while Ctrl
+-        // is held must not re-send Ctrl.
+-        case NSEventTypeFlagsChanged: {
+-            static NSEventModifierFlags prev = 0;
+-            const NSEventModifierFlags now = [e modifierFlags];
+-            const struct { NSEventModifierFlags bit; uint32_t vk; } mods[] = {
+-                { NSEventModifierFlagShift,   0x10 },   // VK_SHIFT
+-                { NSEventModifierFlagControl, 0x11 },   // VK_CONTROL
+-                { NSEventModifierFlagOption,  0x12 },   // VK_MENU (alt)
+-            };
+-            for (auto& m : mods) {
+-                const bool was = (prev & m.bit) != 0, is = (now & m.bit) != 0;
+-                if (was == is) continue;
+-                if (is) in_push(0x0100, m.vk, 0x00000001u);   // WM_KEYDOWN
+-                else    in_push(0x0101, m.vk, 0xC0000001u);   // WM_KEYUP
+-            }
+-            prev = now;
+-            return true;      // consumed: AppKit must not also beep at it
+-        }
+-        case NSEventTypeMouseMoved:
+-        case NSEventTypeLeftMouseDragged:
+-        case NSEventTypeRightMouseDragged:
+-            in_push(0x0200, 0, mouse_lparam(e));  return false;
+-        case NSEventTypeLeftMouseDown:
+-            in_push(0x0201, 1, mouse_lparam(e));  return false;
+-        case NSEventTypeLeftMouseUp:
+-            in_push(0x0202, 0, mouse_lparam(e));  return false;
+-        case NSEventTypeRightMouseDown:
+-            in_push(0x0204, 2, mouse_lparam(e));  return false;
+-        case NSEventTypeRightMouseUp:
+-            in_push(0x0205, 0, mouse_lparam(e));  return false;
+-        // Molette / pavé tactile -> WM_MOUSEWHEEL (120 par cran, mot haut du wParam). Le pavé donne des
+-        // points continus : on les cumule, un cran tous les 24 points ; l'inertie est ignorée pour qu'un
+-        // geste ne fasse pas défiler dix armes.
+-        case NSEventTypeScrollWheel: {
+-            static double acc = 0;
+-            if ([e momentumPhase] != NSEventPhaseNone) return false;
+-            const double step = [e hasPreciseScrollingDeltas] ? 24.0 : 1.0;
+-            acc += [e scrollingDeltaY];
+-            while (acc >= step || acc <= -step) {
+-                const int16_t d = acc > 0 ? 120 : -120;
+-                acc -= acc > 0 ? step : -step;
+-                in_push(0x020A, (uint32_t)(uint16_t)d << 16, mouse_lparam(e));
+-            }
+-            return false;
+-        }
+-        default:
+-            return false;
+-    }
+-}
+ }  // namespace
+-
++extern "C" void ios_game_event(uint32_t msg, uint32_t wp, uint32_t lp) { in_push(msg, wp, lp); }
+ // Consumer side, called on the guest thread. Returns 0 when the queue is empty.
+ extern "C" int gfx_input_pop(uint32_t* msg, uint32_t* wp, uint32_t* lp) {
+     std::lock_guard<std::mutex> lk(g_in_mu);
+@@ -3934,7 +3819,9 @@
+ } g_pst;
+ static uint64_t g_pst_cumul_neufs = 0, g_pst_cumul_affiches = 0;
+ 
++extern "C" void ios_count_game_frame();
+ static void present_track(id<CAMetalDrawable> drawable, bool neuf) {
++    if (neuf) ios_count_game_frame();
+     {   const double t = CACurrentMediaTime();
+         std::lock_guard<std::mutex> lk(g_pst.mu);
+         g_pst.soumis++;
+@@ -3944,6 +3831,7 @@
+                 g_pst.iv_ms.push_back((t - g_pst.dernier_neuf) * 1000.0);
+             g_pst.dernier_neuf = t;
+         } }
++    if (![drawable respondsToSelector:@selector(addPresentedHandler:)]) return;
+     [drawable addPresentedHandler:^(id<MTLDrawable> d) {
+         std::lock_guard<std::mutex> lk(g_pst.mu);
+         if (d.presentedTime <= 0.0) { g_pst.non_affiches++; return; }
+@@ -4083,50 +3971,19 @@
+ // closes the window, so the caller can stop pumping.
+ static uint64_t g_drawables_nil = 0;   // P774 : nextDrawable sans drawable (fenêtre réduite ?)
+ extern "C" bool gfx_pump_once() {
++    if (!NSThread.isMainThread) {
++        __block bool result;
++        dispatch_sync(dispatch_get_main_queue(), ^{ result = gfx_pump_once(); });
++        return result;
++    }
+     if (!g_open.load()) return false;
++    if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return true;
++    collect_pipelines();
+     keypipe_start_once();
+     clickpipe_start_once();
+     @autoreleasepool {
+         // Non-blocking event drain — the guest is running on the worker thread and
+         // must never be stalled waiting on the UI.
+-        for (;;) {
+-            NSEvent* e = [NSApp nextEventMatchingMask:NSEventMaskAny
+-                                            untilDate:[NSDate distantPast]
+-                                               inMode:NSDefaultRunLoopMode
+-                                              dequeue:YES];
+-            if (!e) break;
+-            {   // C16 : tenir / rendre le pointeur (avant in_translate, qui consomme ⌘).
+-                const NSEventType t = [e type];
+-                if ((t == NSEventTypeLeftMouseDown || t == NSEventTypeRightMouseDown) &&
+-                    [e window] == g_window &&      // la zone de jeu, pas la barre de titre
+-                    NSPointInRect([e locationInWindow], [[g_window contentView] frame]))
+-                    pointer_engage(true, "clic dans la fenetre");
+-                else if (t == NSEventTypeFlagsChanged &&
+-                         ([e modifierFlags] & NSEventModifierFlagCommand))
+-                    pointer_engage(false, "touche commande");
+-            }
+-            // Key events are consumed here: passing an unhandled keyDown on to
+-            // AppKit makes the system beep on every keypress.
+-            if (!in_translate(e)) [NSApp sendEvent:e];
+-        }
+-        switch (g_fenetre_cmd.exchange(0)) {   // P774 : commandes de fenêtre du tube clavier
+-            case 'd': [g_window miniaturize:nil]; break;
+-            case 's': [NSApp hide:nil]; break;
+-            case 'n': [NSApp unhide:nil]; [g_window deminiaturize:nil]; break;
+-        }
+-        // P774 : réduite (Dock) ou app masquée (⌘H), isVisible répond NO aussi ; sous Windows le
+-        // jeu continue et revient à l'écran. Seule la fermeture arrête la pompe.
+-        if (![g_window isVisible] && ![g_window isMiniaturized] && ![NSApp isHidden]) {
+-            pointer_engage(false, "fenetre fermee");   // the pump stops here: nothing would give it back later
+-            if (g_pointeur_cache) { g_pointeur_cache = false; [NSCursor unhide]; }
+-            g_open.store(false); return false;
+-        }
+-        if (static bool cachee = false; cachee != ![g_window isVisible]) {
+-            cachee = !cachee;
+-            fprintf(stderr, "[FENETRE] %s, la pompe continue (drawables_nil=%llu)\n",
+-                    !cachee ? "revenue" : [NSApp isHidden] ? "masquée" : "réduite",
+-                    (unsigned long long)g_drawables_nil);
+-        }
+         {   // Focus changes become WM_ACTIVATEAPP/WM_ACTIVATE/WM_SETFOCUS. The
+             // engine's input frame refuses to poll anything until it believes it
+             // is the foreground window, so this is not cosmetic.
+@@ -4149,7 +4006,7 @@
+             // So: SAY IT, ALWAYS. One line per transition, no env gate — a
+             // transition is rare and the absence of this line is itself the
+             // evidence that focus never moved.
+-            bool key = [g_window isKeyWindow] != NO;
++            bool key = g_window.isKeyWindow && UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
+             // ⚠️ PUBLISH THE **REAL** KEY STATE, BEFORE BO2_FORCE_FOCUS masks it.
+             // The cursor recentring in user32_impl.cpp must obey the window
+             // server, not the forced-foreground lie we tell the guest: the tester had
+@@ -4159,25 +4016,10 @@
+             g_window_really_key.store(key, std::memory_order_relaxed);
+             if (!key) pointer_engage(false, "fenetre plus au premier plan");   // C16
+             {
+-                const NSRect r = [g_window convertRectToScreen:[[g_window contentView] frame]];
+-                g_centre_x.store(floor(NSMidX(r)), std::memory_order_relaxed);
+-                g_centre_y.store(floor(CGDisplayBounds(CGMainDisplayID()).size.height - NSMidY(r)),
+-                                 std::memory_order_relaxed);
+-                g_centre_t.store(CACurrentMediaTime(), std::memory_order_relaxed);
+-                // The pointer is hidden while the game keeps putting it back in the middle (mouse look), and
+-                // shown again 0.5 s after it stops (menus) or as soon as it is given back. The guest's
+-                // ShowCursor count cannot decide this: it flips between 0 and -1 at frame rate in the menus
+-                // ([CURSOR] ShowCursor, run 011331).
+-                const bool veut = key && gfx_pointer_engaged() &&
+-                    CACurrentMediaTime() - g_pointeur_fixe_t.load(std::memory_order_relaxed) < 0.5;
+-                if (veut != g_pointeur_cache) {
+-                    g_pointeur_cache = veut;
+-                    if (veut) [NSCursor hide]; else [NSCursor unhide];
+-                    static uint64_t n = 0;
+-                    if (++n <= 8 || (n & (n - 1)) == 0)
+-                        fprintf(stderr, "[CURSOR] pointeur %s (#%llu)\n", veut ? "cache : le jeu le fixe au centre" : "montre",
+-                                (unsigned long long)n);
+-                }
++                CGRect rect = ios_game_view().bounds;
++                g_centre_x.store(CGRectGetMidX(rect));
++                g_centre_y.store(CGRectGetMidY(rect));
++                g_centre_t.store(CACurrentMediaTime());
+             }
+             // BO2_FORCE_FOCUS=1 — tell the guest it is foreground no matter what
+             // the window server thinks. This is for DRIVEN runs: it lets the
+@@ -4220,6 +4062,14 @@
+             if (g_pending.ready) {
+                 g_pending.ready = false;
+                 MTLPixelFormat pf = dxgi_to_metal(g_pending.fmt);
++                if (is_block_compressed(pf) && !ios_native_bc) {
++                    TexStage tmp{};
++                    tmp.w=g_pending.w; tmp.h=g_pending.h; tmp.pitch=g_pending.pitch; tmp.fmt=g_pending.fmt;
++                    tmp.bytes.swap(g_pending.bytes);
++                    if (!ios_expand_texture(tmp)) return true;
++                    tmp.bytes.swap(g_pending.bytes); g_pending.pitch=tmp.pitch;
++                    pf=MTLPixelFormatRGBA8Unorm;
++                }
+                 MTLTextureDescriptor* td = [MTLTextureDescriptor
+                     texture2DDescriptorWithPixelFormat:pf
+                                                  width:g_pending.w
+@@ -4254,7 +4104,7 @@
+         // added alongside this could never fire, because it compares against a
+         // drawableSize that never changed. Re-sync it here, once per frame, which is
+         // also the only place guaranteed to run on the render thread.
+-        if (NSView* v = [g_window contentView]) {
++        if (UIView *v = ios_game_view()) {
+             const CGFloat sc = g_layer.contentsScale > 0 ? g_layer.contentsScale : 1;
+             // 10-21 : l'image a la taille du tampon arriere du JEU, pas celle de la fenetre ; CoreAnimation
+             // l'agrandit en gardant les proportions. A la taille de la fenetre (2560x1440 Retina pour un jeu
+@@ -4268,8 +4118,8 @@
+             // pixels. Published from here because this is the one place that is
+             // both on the real main thread (where AppKit geometry may be read) and
+             // guaranteed to run every frame, so they track a resize.
+-            g_fen_visible.store(([g_window occlusionState] & NSWindowOcclusionStateVisible) ? 1 : 0);
+-            g_app_active.store([NSApp isActive] ? 1 : 0);
++            g_fen_visible.store(g_window.isHidden ? 0 : 1);
++            g_app_active.store(UIApplication.sharedApplication.applicationState == UIApplicationStateActive);
+             g_client_w.store((int)v.bounds.size.width);
+             g_client_h.store((int)v.bounds.size.height);
+             if (want.width > 0 && want.height > 0 &&
+@@ -4404,6 +4254,10 @@
+                 if (g_texreg.count(kv.first) &&
+                     kv.second.depth == 1 && kv.second.faces == 1) continue;
+                 MTLPixelFormat pf = dxgi_to_metal(kv.second.fmt);
++                if (is_block_compressed(pf) && !ios_native_bc) {
++                    if (!ios_expand_texture(kv.second)) continue;
++                    pf = MTLPixelFormatRGBA8Unorm;
++                }
+                 // 🎯 DECODE A LARGE BLOCK-COMPRESSED TEXTURE TO RGBA8 so it can
+                 // have a mip chain. Metal will not generate mips for a compressed
+                 // format, and these are precisely the rock and terrain surfaces
+@@ -4804,58 +4658,47 @@
+         {   // Compile any staged MSL. Metal's compiler is only safe here, and a
+             // failure must be visible: a silently dropped shader would look like
+             // a rendering bug much later.
+-            std::vector<ShaderStage> take;
+-            std::vector<std::pair<uint32_t,std::string>> tslots, cbslots, tdims, smpslots;
++            static std::future<std::shared_ptr<IOSShaderBatch>> compiling;
++            static std::vector<ShaderStage> queued;
++            static std::unordered_set<uint32_t> scheduled;
+             std::vector<std::pair<uint32_t,id<MTLSamplerState>>> smps;
+-            { std::lock_guard<std::mutex> lk(g_shader_mu);
+-              take.swap(g_shader_pending); tslots.swap(g_texslot_pending);
+-              cbslots.swap(g_cbslot_pending); tdims.swap(g_texdim_pending);
+-              smpslots.swap(g_smpslot_pending); smps.swap(g_sampler_pending); }
+-            for (auto& kv : smps) g_sampreg[kv.first] = kv.second;   // P805
+-            // Le lot en parallèle (3,85× sur 8 cœurs, P770) : le fil principal le compilait shader par shader.
+-            // D'abord le metallib (msl_cache.sh) ou la préchauffe ; le reste est compilé par lots (msl_compile), au
+-            // plus huit lots pour garder les cœurs occupés, au plus 32 sources par lot.
+-            std::vector<id<MTLFunction>> fns(take.size());
+-            std::vector<std::string> why(take.size());
+-            const ShaderStage* tk = take.data();
+-            __strong id<MTLFunction>* pf = fns.data();
+-            const double tm0 = CACurrentMediaTime();
+-            dispatch_apply(take.size(), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t i) {
+-                if (g_shader_fn.count(tk[i].obj)) return;
+-                id<MTLLibrary> l = [g_device newLibraryWithURL:[NSURL fileURLWithPath:msl_cache_path(tk[i].msl, "metallib")]
+-                                                         error:nil];
+-                if ((pf[i] = [l newFunctionWithName:@"xlatMtlMain"])) { g_msl_from_cache++; return; }
+-                if ((pf[i] = msl_warm_get(msl_fnv64(tk[i].msl)))) g_msl_from_warm++;
+-            });
+-            std::vector<size_t> at;
+-            std::vector<const std::string*> src;
+-            for (size_t i = 0; i < take.size(); i++)
+-                if (!fns[i] && !g_shader_fn.count(take[i].obj)) { at.push_back(i); src.push_back(&take[i].msl); }
+-            if (!src.empty()) {
+-                const size_t lot = std::min<size_t>((src.size() + 7) / 8, 32);
+-                std::vector<id<MTLFunction>> got(src.size());
+-                std::vector<std::string> gwhy(src.size());
+-                const std::string* const* ps = src.data();
+-                __strong id<MTLFunction>* pg = got.data();
+-                std::string* pw = gwhy.data();
+-                const size_t n = src.size();
+-                dispatch_apply((n + lot - 1) / lot, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^(size_t k) {
+-                    const size_t b = k * lot, m = std::min(lot, n - b);
+-                    msl_compile(ps + b, m, pg + b, pw + b);
+-                    NSFileManager* fm = [NSFileManager defaultManager];
+-                    for (size_t j = b; j < b + m; j++) {
+-                        if (!pg[j]) continue;
+-                        NSString* f = msl_cache_path(*ps[j], "msl");
+-                        [fm createDirectoryAtPath:[f stringByDeletingLastPathComponent]
+-                      withIntermediateDirectories:YES attributes:nil error:nil];
+-                        [@(ps[j]->c_str()) writeToFile:f atomically:YES encoding:NSUTF8StringEncoding error:nil];
+-                    }
++            using Slots = std::vector<std::pair<uint32_t,std::string>>;
++            static Slots tslots, cbslots, tdims, smpslots;
++            {
++                std::lock_guard<std::mutex> lock(g_shader_mu);
++                for (auto& shader : g_shader_pending)
++                    if (scheduled.insert(shader.obj).second) queued.push_back(std::move(shader));
++                g_shader_pending.clear();
++                auto drain = [](Slots& src, Slots& dst) {
++                    for (auto& row : src) dst.push_back(std::move(row));
++                    src.clear();
++                };
++                drain(g_texslot_pending, tslots); drain(g_cbslot_pending, cbslots);
++                drain(g_texdim_pending, tdims); drain(g_smpslot_pending, smpslots);
++                smps.swap(g_sampler_pending);
++            }
++            for (auto& kv : smps) g_sampreg[kv.first] = kv.second;
++            std::shared_ptr<IOSShaderBatch> ready;
++            if (compiling.valid() && compiling.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
++                ready = compiling.get();
++            if (!compiling.valid() && !queued.empty()) {
++                std::stable_partition(queued.begin(), queued.end(), [](const ShaderStage& st) {
++                    return ios_requested_shaders.count(st.obj) != 0;
+                 });
+-                for (size_t j = 0; j < n; j++) { fns[at[j]] = got[j]; why[at[j]] = gwhy[j]; }
++                auto batch = std::make_shared<IOSShaderBatch>();
++                size_t n = std::min<size_t>(16, queued.size());
++                batch->shaders.assign(std::make_move_iterator(queued.begin()), std::make_move_iterator(queued.begin()+n));
++                queued.erase(queued.begin(), queued.begin()+n);
++                compiling = std::async(std::launch::async, [batch] {
++                    @autoreleasepool { ios_compile_batch(*batch); }
++                    return batch;
++                });
+             }
+-            g_win_msl_ms += (CACurrentMediaTime() - tm0) * 1000.0;
++            if (ready) {
++                auto& take = ready->shaders; auto& fns = ready->functions; auto& why = ready->errors;
+             for (size_t i = 0; i < take.size(); i++) {
+                 auto& st = take[i];
++                ios_requested_shaders.erase(st.obj);
+                 if (g_shader_fn.count(st.obj)) continue;
+                 id<MTLFunction> fn = fns[i];
+                 if (fn) {
+@@ -4894,15 +4737,22 @@
+                                 why[i].empty() ? "no function" : why[i].c_str());
+                 }
+             }
++            }
+             // AFTER the records exist, not before: `g_shader_rec[obj] = rec` above
+             // replaces the whole record, so applying the maps first silently threw
+             // them away — which is why the texture mapping looked like it had no
+             // effect when it was measured.
+-            auto apply = [](const std::vector<std::pair<uint32_t,std::string>>& src,
++            auto apply = [](Slots& src,
+                             std::unordered_map<uint32_t,uint32_t> ShaderRec::* field) {
+-                for (const auto& kv : src) {
++                auto pending=src.begin();
++                for (auto it=src.begin(); it!=src.end(); ++it) {
++                    auto& kv=*it;
+                     auto rit = g_shader_rec.find(kv.first);
+-                    if (rit == g_shader_rec.end()) continue;   // shader never compiled
++                    if (rit == g_shader_rec.end()) {
++                        if (pending != it) *pending = std::move(kv);
++                        ++pending;
++                        continue;
++                    }
+                     rit->second.plat = false;                  // C49 : tables aplaties perimees
+                     auto& m = rit->second.*field;
+                     size_t i = 0;
+@@ -4916,11 +4766,12 @@
+                         i = cm + 1;
+                     }
+                 }
++                src.erase(pending,src.end());
+             };
+             apply(tslots,  &ShaderRec::texslot);
+             apply(cbslots, &ShaderRec::cbslot);
+             apply(tdims,   &ShaderRec::texdim);
+-            apply(smpslots, &ShaderRec::smpslot);   // P805
++            apply(smpslots, &ShaderRec::smpslot);
+         }
+         std::vector<id<MTLTexture>> zero_me;
+         {   // Promote render targets and RTV bindings (main thread only).
+@@ -4935,7 +4786,7 @@
+             for (const RTStage& t : rts) {
+                 if (g_texreg.count(t.obj)) continue;
+                 MTLPixelFormat pf = dxgi_to_metal(t.fmt);
+-                if (pf == MTLPixelFormatInvalid) pf = MTLPixelFormatBGRA8Unorm;
++                if (pf == MTLPixelFormatInvalid || is_block_compressed(pf)) pf = MTLPixelFormatBGRA8Unorm;
+                 MTLTextureDescriptor* td = [MTLTextureDescriptor
+                     texture2DDescriptorWithPixelFormat:pf width:t.w height:t.h
+                                              mipmapped:NO];
+@@ -4958,7 +4809,7 @@
+                     // (it read as solid white).
+                     // Cleared just below, before any draw of this frame can
+                     // render into it (no encoder is open here, P777).
+-                    if (pf != MTLPixelFormatDepth32Float) {
++                    if (pf != MTLPixelFormatDepth32Float_Stencil8) {
+                         zero_me.push_back(tex);
+                         g_rt_cleared.insert(t.obj);
+                     }
+@@ -5516,14 +5367,14 @@
+                         }
+                     }
+                     if (st_grp) {
+-                        Pochoir& p = pochoir_for(st_grp, dw, dh);
++                        Pochoir& p = pochoir_for(st_grp, dw, dh, dtex);
+                         if (p.tex) {
+                             rp2.stencilAttachment.texture      = p.tex;
+                             rp2.stencilAttachment.loadAction   = p.efface >= 0 ? MTLLoadActionClear : MTLLoadActionLoad;
+                             rp2.stencilAttachment.clearStencil = p.efface >= 0 ? (uint32_t)p.efface : 0;
+                             rp2.stencilAttachment.storeAction  = MTLStoreActionStore;
+                             if (p.efface >= 0) ++g_st_n[kStEffacees];
+-                            p.efface = -1; st_fmt = MTLPixelFormatStencil8; ++g_st_n[kStPasses];
++                            p.efface = -1; st_fmt = dtex.pixelFormat; ++g_st_n[kStPasses];
+                         }
+                     }
+                 }
+@@ -5982,7 +5833,7 @@
+             static uint64_t rep2 = 0;
+             if (n && (++rep2 % 200) == 1)
+                 gfx_skip_report();
+-        fprintf(stderr, "[gfx] real draws: %llu issued, %llu skipped, "
++        if ((rep2 % 200) == 1) fprintf(stderr, "[gfx] real draws: %llu issued, %llu skipped, "
+                                 "%llu pipelines (%llu failed); this frame %zu records, "
+                                 "%zu of them to the SCREEN in %zu passes\n",
+                         (unsigned long long)g_real_draws, (unsigned long long)g_real_skipped,
+@@ -6254,7 +6105,7 @@
+                 // separates the two cases was the one never taken. Collected as
+                 // float stats, no PNG: a depth image is unreadable anyway and the
+                 // numbers are the whole answer.
+-                if (rt.pixelFormat == MTLPixelFormatDepth32Float) continue;
++                if (rt.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) continue;
+                 // 🎯 THE BUG THAT MADE THIS INSTRUMENT REPORT 49 OF 50 TARGETS FLAT.
+                 //
+                 // `need` and the blit below both assume 4 bytes per pixel. An HDR
+@@ -6410,7 +6261,7 @@
+                     if (it == g_texreg.end()) continue;
+                     id<MTLTexture> rt = it->second;
+                     if (rt.width < 2 || rt.height < 2) continue;
+-                    if (rt.pixelFormat == MTLPixelFormatDepth32Float) continue;
++                    if (rt.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) continue;
+                     // Probe the ORIGIN, not the centre: the tone-map composite
+                     // samples its colour LUT near (0,0) (a 32x32-tile strip, and
+                     // an empty scene indexes the first entry), so the centre pixel
+@@ -6444,7 +6295,7 @@
+                 for (auto& kv : g_texreg) {
+                     id<MTLTexture> c = kv.second;
+                     if (!c || c.height != 32 || c.width < 512) continue;
+-                    if (c.pixelFormat == MTLPixelFormatDepth32Float) continue;
++                    if (c.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) continue;
+                     if ((uint32_t)c.width > bestw) { bestw = (uint32_t)c.width; best = kv.first; }
+                 }
+                 for (auto& kv : g_texreg) {
+@@ -6469,7 +6320,7 @@
+                     if (it == g_texreg.end()) continue;
+                     id<MTLTexture> rt = it->second;
+                     if (rt.width < 4 || rt.height < 4) continue;
+-                    if (rt.pixelFormat == MTLPixelFormatDepth32Float) continue;
++                    if (rt.pixelFormat == MTLPixelFormatDepth32Float_Stencil8) continue;
+                     [be copyFromTexture:rt sourceSlice:0 sourceLevel:0
+                            sourceOrigin:MTLOriginMake(rt.width / 2, rt.height / 2, 0)
+                              sourceSize:MTLSizeMake(1, 1, 1)
+@@ -6702,9 +6553,12 @@
+ }
+ 
+ extern "C" void gfx_shutdown() {
++    if (!NSThread.isMainThread) {
++        dispatch_sync(dispatch_get_main_queue(), ^{ gfx_shutdown(); });
++        return;
++    }
+     if (!g_open.exchange(false)) return;
+     @autoreleasepool {
+-        [g_window orderOut:nil];
+         g_window = nil;
+         g_layer  = nil;
+         g_queue  = nil;
+diff -ruN a/runtime/input/pad_gc.mm b/runtime/input/pad_gc.mm
+--- a/runtime/input/pad_gc.mm	2026-11-11 09:30:02
++++ b/runtime/input/pad_gc.mm	2026-11-06 21:14:00
+@@ -53,7 +53,7 @@
+ struct Etape { double t; Gamepad g; };   // BO2_PAD_SCRIPT : a partir de t secondes, l'etat g
+ 
+ std::mutex g_mu;
+-Gamepad g_etat;
++Gamepad g_etat, g_touch;
+ bool g_branchee = false;
+ uint32_t g_paquet = 0;
+ GCController* g_ctl = nil;
+@@ -186,6 +186,7 @@
+         [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:nil
+                     usingBlock:^(NSNotification* n) { debrancher((GCController*)n.object); }];
+         for (GCController* c in GCController.controllers) brancher(c);
++        activer_gpad();
+         fprintf(stderr, "[PAD] GameController ARME : %lu manette(s) deja la\n",
+                 (unsigned long)GCController.controllers.count);
+     });
+@@ -193,6 +194,13 @@
+ 
+ }  // namespace
+ 
++extern "C" void ios_touch_pad(unsigned buttons, bool aim, bool fire, float lx, float ly, float rx, float ry) {
++    Gamepad sample{(uint16_t)buttons, (uint8_t)(aim ? 255 : 0), (uint8_t)(fire ? 255 : 0),
++                   axe(lx), axe(ly), axe(rx), axe(ry)};
++    std::lock_guard<std::mutex> lock(g_mu);
++    if (std::memcmp(&sample,&g_touch,sizeof sample)) { g_touch=sample; ++g_paquet; }
++}
++
+ // XInputGetState : 16 octets de XINPUT_STATE dans `out`. Rend ERROR_SUCCESS ou 0x48F.
+ extern "C" uint32_t bo2_pad_etat(uint32_t idx, uint8_t out[16]) {
+     initialiser();
+@@ -204,9 +212,17 @@
+             fprintf(stderr, "[PAD] XInputGetState #%llu (idx 0, %s)\n", (unsigned long long)k,
+                     g_branchee ? "branchee" : "absente");
+     }
+-    if (idx != 0 || !g_branchee) return kNonBranchee;
++    if (idx != 0) return kNonBranchee;
+     std::memcpy(out, &g_paquet, 4);
+-    std::memcpy(out + 4, &g_etat, 12);
++    Gamepad combined = g_etat;
++    if (!g_script_actif) {
++        combined.boutons |= g_touch.boutons;
++        if (g_touch.lt) combined.lt = g_touch.lt;
++        if (g_touch.rt) combined.rt = g_touch.rt;
++        if (g_touch.lx || g_touch.ly) { combined.lx=g_touch.lx; combined.ly=g_touch.ly; }
++        if (g_touch.rx || g_touch.ry) { combined.rx=g_touch.rx; combined.ry=g_touch.ry; }
++    }
++    std::memcpy(out + 4, &combined, sizeof combined);
+     return kSucces;
+ }
+ 
+@@ -214,7 +230,7 @@
+ extern "C" uint32_t bo2_pad_capacites(uint32_t idx, uint8_t out[20]) {
+     initialiser();
+     std::lock_guard<std::mutex> lk(g_mu);
+-    if (idx != 0 || !g_branchee) return kNonBranchee;
++    if (idx != 0) return kNonBranchee;
+     std::memset(out, 0, 20);
+     out[0] = 1; out[1] = 1;                          // XINPUT_DEVTYPE_GAMEPAD, XINPUT_DEVSUBTYPE_GAMEPAD
+     const uint16_t tous = 0xF3FF;                    // tous les boutons existent
+@@ -245,5 +261,5 @@
+     g_top = std::chrono::steady_clock::now(); g_top_donne = true; g_lus_top = g_lus;
+     if (g_script_actif) fprintf(stderr, "[PAD] top du script (%llu lectures idx0 avant)\n",
+                                 (unsigned long long)g_lus);
+-    if (g_branchee) activer_gpad();
++    activer_gpad();
+ }
+diff -ruN a/runtime/win32/guest_monitor.h b/runtime/win32/guest_monitor.h
+--- a/runtime/win32/guest_monitor.h	2026-11-11 09:30:02
++++ b/runtime/win32/guest_monitor.h	2026-11-06 21:34:19
+@@ -13,5 +13,5 @@
+ // carres (metal_backend.mm met l'image de l'invite a l'echelle UNIFORMEMENT, bandes
+ // en plein ecran 16:10), c'est-a-dire le seul mode que DXGI annonce.
+ #include <cstdint>
+-constexpr uint32_t kGuestMonitorW = 1920;
+-constexpr uint32_t kGuestMonitorH = 1080;
++constexpr uint32_t kGuestMonitorW = 1280;
++constexpr uint32_t kGuestMonitorH = 720;
+diff -ruN a/runtime/win32/heap_code.cpp b/runtime/win32/heap_code.cpp
+--- a/runtime/win32/heap_code.cpp	2026-11-11 09:30:02
++++ b/runtime/win32/heap_code.cpp	2026-11-06 16:08:55
+@@ -90,6 +90,7 @@
+     if (m) return *m;
+     m = new Moteur();
+     verifie(uc_open(UC_ARCH_X86, UC_MODE_32, &m->uc), "uc_open");
++    verifie(uc_ctl_set_tcg_buffer_size(m->uc, 8u << 20), "translation cache");
+     verifie(uc_mem_map_ptr(m->uc, 0, kGdt, UC_PROT_ALL, bo2_g_base), "carte basse");
+     verifie(uc_mem_map_ptr(m->uc, kGdt, sizeof m->gdt, UC_PROT_ALL, m->gdt), "carte GDT");
+     verifie(uc_mem_map_ptr(m->uc, kGdt + sizeof m->gdt, kEspace - kGdt - sizeof m->gdt, UC_PROT_ALL,
+diff -ruN a/runtime/win32/kernel32_impl.cpp b/runtime/win32/kernel32_impl.cpp
+--- a/runtime/win32/kernel32_impl.cpp	2026-11-11 09:30:02
++++ b/runtime/win32/kernel32_impl.cpp	2026-11-06 16:08:55
+@@ -50,9 +50,9 @@
+ #include <signal.h>
+ #include <malloc/malloc.h>
+ #include <mach/mach.h>          // P795 : [FILS-CPU], temps CPU par fil
+-#include <mach/mach_vm.h>       // Z-NATIF-23b : [A-COUP-FIL], pile hote d'un autre fil
++#include <mach/vm_map.h>
+ #include <mach/mach_time.h>
+-#include <libproc.h>
++#include <sys/resource.h>
+ #include <unordered_map>
+ #include <unordered_set>
+ #include <algorithm>
+@@ -1374,12 +1374,14 @@
+         mach_port_deallocate(mach_task_self(), th[i]);
+     }
+     vm_deallocate(mach_task_self(), (vm_address_t)th, tot * sizeof(thread_act_t));
+-    rusage_info_v6 ru{}; proc_pid_rusage(getpid(), RUSAGE_INFO_V6, (rusage_info_t*)&ru);
++    struct rusage usage{};
++    getrusage(RUSAGE_SELF, &usage);
++    auto ns = [](timeval t) { return uint64_t(t.tv_sec)*1000000000 + uint64_t(t.tv_usec)*1000; };
+     r.t = bo2_mono_ns();
+-    r.cpu = (ru.ri_user_time + ru.ri_system_time) * tb.numer / tb.denom;
+-    r.pcpu = (ru.ri_user_ptime + ru.ri_system_ptime) * tb.numer / tb.denom;
+-    r.pret = ru.ri_runnable_time * tb.numer / tb.denom;   // fils prets, sur coeur OU non : sans coeur = pret - cpu
+-    r.cyc = ru.ri_cycles; r.pageins = ru.ri_pageins;
++    r.cpu = ns(usage.ru_utime) + ns(usage.ru_stime);
++    r.pageins = usage.ru_majflt;
++    // iOS exposes no public per-process performance-core or runnable-time counters.
++    r.pcpu = r.pret = r.cyc = 0;
+ }
+ void* acoup_veilleur(void* arg) {
+     const uint64_t seuil_ns = (uint64_t)(intptr_t)arg * 1000000ull;
+@@ -1425,8 +1427,8 @@
+                     pcs[s][i][npc[s][i]++] = arm_thread_state64_get_pc(st);
+                     pcs[s][i][npc[s][i]++] = arm_thread_state64_get_lr(st);
+                     while (npc[s][i] < AC_NF && fp && !(fp & 7)) {
+-                        uint64_t w[2]; mach_vm_size_t lu = 0;
+-                        if (mach_vm_read_overwrite(mach_task_self(), fp, sizeof w, (mach_vm_address_t)w, &lu) != KERN_SUCCESS
++                        uint64_t w[2]; vm_size_t lu = 0;
++                        if (vm_read_overwrite(mach_task_self(), fp, sizeof w, (vm_address_t)w, &lu) != KERN_SUCCESS
+                             || lu != sizeof w) break;
+                         pcs[s][i][npc[s][i]++] = w[1] & 0x00007fffffffffffull;
+                         if (w[0] <= fp) break;
+@@ -1570,11 +1572,17 @@
+ // `ctx` reste donc pour la premiere entree seulement : setcontext sur la pile neuve de
+ // makecontext (un sigprocmask par vie de coroutine, pas par tour). Les fils heberges ne
+ // passent jamais ici (host_thread_entry appelle thread_trampoline directement).
++static void thread_trampoline();
++static __attribute__((naked,noreturn)) void ios_enter_stack(void *top, void (*entry)()) {
++    __asm__ volatile("mov sp, x0\n"
++                     "blr x1\n"
++                     "brk #1");
++}
+ static inline void coop_switch(GThread* from, GThread* to) {
+     from->sw_live = true;
+     if (_setjmp(from->sw_jb) == 0) {
+         if (to->sw_live) _longjmp(to->sw_jb, 1);
+-        setcontext(&to->ctx);
++        ios_enter_stack(to->hstack + COSTACK, thread_trampoline);
+     }
+ }
+ 
+@@ -4019,9 +4027,7 @@
+     t->req_stack = req_stack;
+     t->proc = proc; t->param = param; t->wait_h = 0;
+     t->wake_token = false; t->unwinding = false; t->wake_at = 0; t->resume_pc = 0; t->dispatch_armed = false;
+-    getcontext(&t->ctx);
+-    t->ctx.uc_stack.ss_sp = t->hstack; t->ctx.uc_stack.ss_size = COSTACK; t->ctx.uc_link = nullptr;
+-    makecontext(&t->ctx, thread_trampoline, 0);
++    // First entry uses the aligned host stack directly on iOS.
+     // ⚠️ LA REALLOCATION EST LA COURSE QU'ON NE VERRAIT PAS. `sched_init` reserve
+     // 64 entrees ; un fil hote lit `g_threads[idx]` sans verrou, ce qui est SUR
+     // tant que le tampon du vecteur ne bouge pas. Le hurler AVANT plutot que de
+diff -ruN a/runtime/win32/remaining_dlls_impl.cpp b/runtime/win32/remaining_dlls_impl.cpp
+--- a/runtime/win32/remaining_dlls_impl.cpp	2026-11-11 09:30:02
++++ b/runtime/win32/remaining_dlls_impl.cpp	2026-11-10 17:19:42
+@@ -37,6 +37,33 @@
+ #include <arm_neon.h>          // C35, C46 ib_min_max
+ extern std::atomic<uint32_t> t_fake_handle_counter;
+ 
++
++#include "steam_abi_generated.h"
++#include <unordered_set>
++static bool steam_trace_enabled() {
++    static const bool enabled = [] { const char *p = bo2_getenv("BO2_STEAM_TRACE"); return p && *p && strcmp(p, "0"); }();
++    return enabled;
++}
++static void steam_trace_event(int iface, int slot, int words, uint32_t length,
++                              uint32_t callback, uint32_t returned = 0) {
++    if (!steam_trace_enabled()) return;
++    const auto *entry = steam_abi::lookup((unsigned)iface, (unsigned)slot);
++    const auto *factory = steam_abi::lookup((unsigned)iface, 0);
++    static std::mutex mutex;
++    static std::unordered_set<uint64_t> seen;
++    const auto thread = std::hash<std::thread::id>{}(std::this_thread::get_id());
++    const uint64_t key = ((uint64_t)thread << 20) ^ ((uint64_t)(iface & 255) << 12) ^
++                         (uint64_t)(slot & 4095) ^ ((uint64_t)callback << 32);
++    std::lock_guard<std::mutex> lock(mutex);
++    if (seen.size() >= 8192 || !seen.insert(key).second) return;
++    const char *category = entry ? entry->resultCategory : "unknown";
++    fprintf(stderr, "[STEAM-TRACE] iface=%d version=%s slot=%d method=%s stack_words=%d result=%s legacy_handler=%d thread=%zu length=%u callback=%u bool_result=%d\n",
++        iface, factory ? factory->version : "unknown", slot,
++        entry ? entry->method : "factory-or-callback", words, category,
++        entry ? entry->legacyImplemented : 0, thread, length, callback,
++        !strcmp(category, "bool") ? (returned != 0) : -1);
++}
++
+ // Generic stubs with specific arg counts
+ #define DLL_STUB0(name)  static void impl_##name(State& s) { s.gpr.rax.dword = 0; win32_stdcall_ret(s, 0); }
+ #define DLL_STUB1(name)  static void impl_##name(State& s) { s.gpr.rax.dword = 0; win32_stdcall_ret(s, 1); }
+@@ -231,11 +258,7 @@
+ static constexpr uint32_t kSteamAppId = 202970;   // Black Ops II (campagne)
+ #endif
+ [[noreturn]] static void steam_reel_refus(const std::string& why) {
+-    fprintf(stderr, "[STEAM-REEL] refus : %s\n", why.c_str());
+-    std::string m;   // ni ' ni " dans la commande du shell
+-    for (char c : why) m += c == '\'' ? std::string("’") : c == '"' ? std::string("”") : std::string(1, c);
+-    const std::string cmd = "osascript -e 'display alert \"Black Ops II\" message \"" + m + "\" giving up after 600' >/dev/null 2>&1 &";   // détachée : on sort tout de suite
+-    system(cmd.c_str());
++    fprintf(stderr, "[STEAM] %s\n", why.c_str());
+     _exit(78);
+ }
+ // Refusal text in the Mac's language (the 9 of tools/setup_window.swift), English otherwise. %u = the Steam app id.
+@@ -281,73 +304,72 @@
+          "Black Ops II（%u）がSteamライブラリにありません。"},
+     };
+     std::string l = "en";   // first of AppleLanguages: ( "fr-FR", ... ) or ( fr, ... )
+-    if (FILE* p = popen("defaults read -g AppleLanguages 2>/dev/null", "r")) {
+-        char b[256] = {0};
+-        fread(b, 1, sizeof b - 1, p);
+-        pclose(p);
+-        if (const char* q = strchr(b, '(')) {
+-            while (*q && !isalpha((unsigned char)*q)) q++;
+-            if (isalpha((unsigned char)q[0]) && isalpha((unsigned char)q[1])) l.assign(q, 2);
+-        }
+-    }
++    if (const char* lang = getenv("LANG")) l.assign(lang, 0, 2);
+     size_t i = 1;
+     for (size_t j = 0; j < sizeof langues / sizeof *langues; j++) if (l == langues[j]) i = j;
+     char m[512];
+     snprintf(m, sizeof m, textes[i][k], kSteamAppId);
+     return m;
+ }
++extern "C" uint64_t ios_steam_account();
++extern "C" bool ios_steam_owns(void*, uint32_t);
++extern "C" bool ios_steam_dlc(void*, uint32_t);
+ static const SteamReel& steam_reel() {
++    // Xcode seals the Mac Steam client's ownership snapshot into this personal app.
++    // Offline play cannot claim a live Steam login or commit stats to Steam.
+     static const SteamReel r = [] {
+-        SteamReel r;
+-        const std::string lib = std::string(getenv("HOME")) + "/Library/Application Support/Steam/Steam.AppBundle/Steam/"
+-                                "Contents/MacOS/Frameworks/Steam Helper.app/Contents/MacOS/libsteam_api.dylib";
+-        void* h = dlopen(lib.c_str(), RTLD_NOW);
+-        if (!h) steam_reel_refus(steam_texte(kSteamAbsent));
+-        auto init = (int (*)(char*))dlsym(h, "SteamAPI_InitFlat");
+-        // A Steam update (the beta first) can move an interface to a newer version and drop the old accessor (issue #6).
+-        // The flat ISteam* functions of a libsteam_api follow its newest interface, so take the newest accessor it has.
+-        auto acces = [h](const char* base, int de) -> void* (*)() {
+-            for (int v = de + 20; v >= de; v--) {
+-                char n[64];
+-                snprintf(n, sizeof n, "%s%03d", base, v);
+-                if (void* f = dlsym(h, n)) return (void* (*)())f;
+-            }
+-            return nullptr;
+-        };
+-        auto user = acces("SteamAPI_SteamUser_v", 23);
+-        auto apps = acces("SteamAPI_SteamApps_v", 9);
+-        auto sid = (uint64_t (*)(void*))dlsym(h, "SteamAPI_ISteamUser_GetSteamID");
+-        r.sub = (bool (*)(void*, uint32_t))dlsym(h, "SteamAPI_ISteamApps_BIsSubscribedApp");
+-        r.dlc = (bool (*)(void*, uint32_t))dlsym(h, "SteamAPI_ISteamApps_BIsDlcInstalled");
+-        r.logged = (bool (*)(void*))dlsym(h, "SteamAPI_ISteamUser_BLoggedOn");
+-        auto stats = acces("SteamAPI_SteamUserStats_v", 13);
+-        r.store = (bool (*)(void*))dlsym(h, "SteamAPI_ISteamUserStats_StoreStats");
+-        if (!init || !user || !apps || !sid || !r.sub || !r.dlc || !r.logged || !stats || !r.store) {
+-            fprintf(stderr, "[STEAM-REEL] missing in %s:%s%s%s%s%s%s%s%s%s\n", lib.c_str(), init ? "" : " InitFlat",
+-                    user ? "" : " SteamUser_v023+", apps ? "" : " SteamApps_v009+", sid ? "" : " GetSteamID",
+-                    r.sub ? "" : " BIsSubscribedApp", r.dlc ? "" : " BIsDlcInstalled", r.logged ? "" : " BLoggedOn",
+-                    stats ? "" : " SteamUserStats_v013+", r.store ? "" : " StoreStats");
+-            steam_reel_refus(steam_texte(kSteamAncien));
+-        }
+-        setenv("SteamAppId", std::to_string(kSteamAppId).c_str(), 1);
+-        char err[1024] = {0};
+-        if (init(err) != 0)
+-            steam_reel_refus(steam_texte(kSteamInit) + " (Steam: " + err + ")");
+-        r.apps = apps();
+-        r.user = user();
+-        r.stats = stats();
+-        r.id = sid(r.user);
+-        if (!r.apps || !r.id || !r.sub(r.apps, kSteamAppId))
++        SteamReel result;
++        result.id = ios_steam_account();
++        result.sub = ios_steam_owns;
++        result.dlc = ios_steam_dlc;
++        result.logged = [](void*) { return ios_steam_account() != 0 && ios_steam_owns(nullptr, kSteamAppId); };
++        result.store = [](void*) { return false; };
++        if (!result.id || !result.sub(nullptr, kSteamAppId))
+             steam_reel_refus(steam_texte(kSteamPasPossede));
+-        fprintf(stderr, "[STEAM-REEL] compte Steam connecté, jeu %u possédé\n", kSteamAppId);
+-        return r;
++        return result;
+     }();
+     return r;
+ }
+-static void impl_SteamAPI_Init(State& s) { steam_reel(); s.gpr.rax.dword = 1; win32_cdecl_ret(s); }
+-BINK_STUB(SteamAPI_RegisterCallback)
++#include "SteamRuntimeCalls.h"
++#include "SteamGuestCallbacks.h"
++static BO2SteamRuntimeCalls g_native_steam_calls;
++struct NativeSteamCallback { uint32_t id; bool server; };
++static std::mutex g_native_callback_mutex;
++static std::unordered_map<uint32_t,NativeSteamCallback> g_native_callbacks;
++static void impl_SteamAPI_Init(State& s) {
++    const auto p = bo2_ios_steam_provider_snapshot();
++    if (p.context) s.gpr.rax.dword = p.isLoggedOn(p.context) && p.ownsApp(p.context,kSteamAppId);
++    else { steam_reel(); s.gpr.rax.dword = 1; }
++    win32_cdecl_ret(s);
++}
++static void impl_SteamAPI_RegisterCallback(State& s) {
++    steam_trace_event(0,-2,2,0,win32_arg(s,1));
++    if (steam_trace_enabled()) {
++        const uint32_t callback=win32_arg(s,0),table=win32_mem_read32(callback);
++        fprintf(stderr,"[STEAM-CALLBACK-ABI] callback=%u flags=%u run0=%08x run1=%08x size=%08x\n",
++            win32_arg(s,1),(unsigned)win32_mem_read8(callback+4),win32_mem_read32(table),
++            win32_mem_read32(table+4),win32_mem_read32(table+8));
++    }
++    if (bo2_ios_steam_provider_snapshot().context) {
++        const uint32_t callback=win32_arg(s,0),id=win32_arg(s,1);
++        const uint8_t flags=win32_mem_read8(callback+4);
++        std::lock_guard<std::mutex> lock(g_native_callback_mutex);
++        g_native_callbacks[callback]={id,(flags&2)!=0};
++        win32_mem_write32(callback+8,id);
++        win32_mem_write8(callback+4,flags|1);
++    }
++    win32_cdecl_ret(s);
++}
+ BINK_STUB(SteamAPI_Shutdown)
+-BINK_STUB(SteamAPI_UnregisterCallback)
++static void impl_SteamAPI_UnregisterCallback(State& s) {
++    if (bo2_ios_steam_provider_snapshot().context) {
++        const uint32_t callback=win32_arg(s,0);
++        std::lock_guard<std::mutex> lock(g_native_callback_mutex);
++        g_native_callbacks.erase(callback);
++        win32_mem_write8(callback+4,win32_mem_read8(callback+4)&~1u);
++    }
++    win32_cdecl_ret(s);
++}
+ // t6zm asks Steam for an encrypted app ticket before it authenticates to Demonware (0x53c2a8 -> 0x5d8360:
+ // ISteamUser::RequestEncryptedAppTicket, slot 20, then SteamAPI_RegisterCallResult on the handle), polls
+ // SteamAPI_RunCallbacks until its CCallResult (vtable 0xbd6528, slot 0 = Run(param, ioFailure, call) -> 0x49e280)
+@@ -358,50 +380,74 @@
+ static std::mutex g_steam_mu;                                    // the five below
+ static uint8_t g_steam_app_ticket[128];
+ static uint32_t g_steam_ticket_len;
++static uint32_t g_legacy_ticket_response;
+ static uint64_t g_steam_calls;                                   // last SteamAPICall_t handed out
+ static std::vector<uint64_t> g_steam_done;                       // calls whose result waits for RunCallbacks
+ static std::unordered_map<uint64_t, uint32_t> g_steam_results;   // call -> the guest CCallbackBase registered for it
+-static uint32_t g_steam_ticket_response;                               // guest EncryptedAppTicketResponse_t { k_EResultOK }
++
+ static void impl_SteamAPI_RegisterCallResult(State& s) {             // (pCallback, hAPICall), cdecl
++    if (bo2_ios_steam_provider_snapshot().context) {
++        g_native_steam_calls.registerCallback(win32_arg(s,1) | (uint64_t)win32_arg(s,2)<<32,win32_arg(s,0));
++        win32_cdecl_ret(s); return;
++    }
+     std::lock_guard<std::mutex> lock(g_steam_mu);
+     g_steam_results[win32_arg(s, 1) | (uint64_t)win32_arg(s, 2) << 32] = win32_arg(s, 0);
+     win32_cdecl_ret(s);
+ }
+ static void impl_SteamAPI_UnregisterCallResult(State& s) {
++    if (bo2_ios_steam_provider_snapshot().context) {
++        g_native_steam_calls.unregisterCallback(win32_arg(s,1) | (uint64_t)win32_arg(s,2)<<32);
++        win32_cdecl_ret(s); return;
++    }
+     std::lock_guard<std::mutex> lock(g_steam_mu);
+     g_steam_results.erase(win32_arg(s, 1) | (uint64_t)win32_arg(s, 2) << 32);
+     win32_cdecl_ret(s);
+ }
+ static void impl_SteamAPI_RunCallbacks(State& s) {
+-    std::vector<std::pair<uint64_t, uint32_t>> run;                  // delivered outside the lock: guest code runs
+-    {
++    std::vector<BO2SteamRuntimeCalls::Completion> run;
++    const bool native = bo2_ios_steam_provider_snapshot().context != nullptr;
++    if (native) run = g_native_steam_calls.drain();
++    else {
+         std::lock_guard<std::mutex> lock(g_steam_mu);
+-        for (auto it = g_steam_done.begin(); it != g_steam_done.end();) {
+-            const auto handler = g_steam_results.find(*it);
+-            if (handler == g_steam_results.end()) { ++it; continue; }
+-            run.emplace_back(*it, handler->second);
++        for (auto it=g_steam_done.begin(); it!=g_steam_done.end();) {
++            const auto handler=g_steam_results.find(*it);
++            if (handler==g_steam_results.end()) { ++it; continue; }
++            run.push_back({*it,handler->second,1});
+             g_steam_results.erase(handler);
+-            it = g_steam_done.erase(it);
++            it=g_steam_done.erase(it);
+         }
+-        if (!run.empty() && !g_steam_ticket_response) {
+-            g_steam_ticket_response = win32_guest_alloc(8, 4);
+-            win32_mem_write32(g_steam_ticket_response, 1);
++    }
++    // Preserve the receipt-based runtime's immutable local success response.
++    // It is initialized once and never shared with the genuine provider path.
++    if (!native && !run.empty()) {
++        std::lock_guard<std::mutex> lock(g_steam_mu);
++        if (!g_legacy_ticket_response) {
++            g_legacy_ticket_response=win32_guest_alloc(8,4);
++            win32_mem_write32(g_legacy_ticket_response,1);
++            win32_mem_write32(g_legacy_ticket_response+4,0);
+         }
+     }
+-    for (const auto& [call, callback] : run) {                       // callback->Run(&response, false, call), thiscall
+-        const uint32_t save_esp = s.gpr.rsp.dword;
+-        uint32_t sp = save_esp;
+-        sp -= 4; win32_mem_write32(sp, (uint32_t)(call >> 32));
+-        sp -= 4; win32_mem_write32(sp, (uint32_t)call);
+-        sp -= 4; win32_mem_write32(sp, 0);
+-        sp -= 4; win32_mem_write32(sp, g_steam_ticket_response);
+-        sp -= 4; win32_mem_write32(sp, 0xDEAD0000u);                 // return sentinel
+-        s.gpr.rsp.dword = sp;
+-        s.gpr.rcx.dword = callback;
+-        const bool ok = win32_run_lifted(&s, win32_mem_read32(win32_mem_read32(callback)));
+-        s.gpr.rsp.dword = save_esp;
+-        fprintf(stderr, "[STEAM] resultat de l'appel %llu livre a 0x%08x (Run 0x%08x)%s\n", (unsigned long long)call,
+-                callback, win32_mem_read32(win32_mem_read32(callback)), ok ? "" : " ECHEC");
++    for (const auto &completed : run) {
++        if (!native) {
++            const uint32_t saved=s.gpr.rsp.dword;
++            uint32_t sp=saved;
++            sp-=4;win32_mem_write32(sp,(uint32_t)(completed.call>>32));
++            sp-=4;win32_mem_write32(sp,(uint32_t)completed.call);
++            sp-=4;win32_mem_write32(sp,0);
++            sp-=4;win32_mem_write32(sp,g_legacy_ticket_response);
++            sp-=4;win32_mem_write32(sp,0xDEAD0000u);
++            s.gpr.rsp.dword=sp;s.gpr.rcx.dword=completed.callback;
++            const bool ok=win32_run_lifted(&s,win32_mem_read32(win32_mem_read32(completed.callback)));
++            s.gpr.rsp.dword=saved;
++            fprintf(stderr,"[STEAM-CALLBACK] native=0 result=1 delivered=%d\n",ok);
++            continue;
++        }
++        const bool ok=bo2SteamDeliverCallResult(s.gpr.rsp.dword,s.gpr.rcx.dword,
++            completed.callback,completed.call,completed.result,
++            [](uint32_t p,uint32_t v){win32_mem_write32(p,v);},
++            [](uint32_t p){return win32_mem_read32(p);},
++            [&](uint32_t va){return win32_run_lifted(&s,va);});
++        fprintf(stderr,"[STEAM-CALLBACK] native=%d result=%u delivered=%d\n",native,completed.result,ok);
+     }
+     win32_cdecl_ret(s);
+ }
+@@ -728,7 +774,7 @@
+ // Last PSSetShaderResources seen, so a draw with no texture can be attributed to the
+ // bind rather than to the lookup.
+ static uint32_t g_last_srv_start = 0, g_last_srv_num = 0, g_last_srv_obj = 0;
+-static float g_vp_now[6] = {0.f, 0.f, 1920.f, 1080.f, 0.f, 1.f};
++static float g_vp_now[6] = {0.f, 0.f, kGuestMonitorW, kGuestMonitorH, 0.f, 1.f};
+ static uint32_t g_ui_vscb0 = 0;
+ static uint32_t g_ui_topo = 4;     // D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST
+ static uint32_t g_ui_ring_off = 0;
+@@ -1122,7 +1168,7 @@
+ };
+ static std::vector<UiVert>  g_ui_v;
+ static std::vector<UiBatch> g_ui_b;
+-static float  g_ui_vpw = 1920.f, g_ui_vph = 1080.f;
++static float  g_ui_vpw = kGuestMonitorW, g_ui_vph = kGuestMonitorH;
+ static int    g_ui_probe = [] { const char* e = bo2_getenv("BO2_UI_PROBE"); return e ? atoi(e) : 0; }();
+ 
+ // Dump a texture's raw bytes to geo_tex_<obj>.bin (once) and a metadata line.
+@@ -2118,6 +2164,7 @@
+ static uint32_t steam_iface_obj(int iface_id) {
+     static uint32_t objs[16] = {0};
+     if (iface_id < 1 || iface_id >= 16) return 0;
++    steam_trace_event(iface_id, -1, 0, 0, 0);
+     if (objs[iface_id]) return objs[iface_id];
+     uint32_t vtbl = win32_guest_alloc(STEAM_VTBL_SLOTS * 4, 4);
+     for (int i = 0; i < STEAM_VTBL_SLOTS; i++)
+@@ -2141,11 +2188,65 @@
+ // and the load ended on Com_Error "PLATFORM_COULDNT_INIT_STEAM_SERVER" (run of 08/10). Answers of
+ // Steam on Windows: SteamGameServer_Init returns true once the server is up,
+ // SteamGameServer() the interface the game asks for, version 011 (Z-NATIF-09p).
+-static void impl_SteamGameServer_Init(State& s) { s.gpr.rax.dword = 1; win32_cdecl_ret(s); }
++static void impl_SteamGameServer_Init(State& s) {
++    if (steam_trace_enabled()) fprintf(stderr,
++        "[STEAM-FLAT] name=SteamGameServer_Init stack_words=6 server_mode=%u\n",win32_arg(s,4));
++    const auto p=bo2_ios_steam_provider_snapshot();
++    uint32_t ready=p.context ? 0 : 1;
++    if (p.context && p.initGameServer) {
++        const uint32_t text=win32_arg(s,5);
++        std::string version;
++        bool terminated=false;
++        if (text) for (uint32_t i=0;i<=128;++i) {
++            const uint8_t byte=win32_mem_read8(text+i);
++            if (!byte) {terminated=true;break;}
++            if (i==128) break;
++            version.push_back((char)byte);
++        }
++        if (terminated) {
++            BO2SteamServerConfig config{};
++            config.ip=win32_arg(s,0);config.steamPort=(uint16_t)win32_arg(s,1);
++            config.gamePort=(uint16_t)win32_arg(s,2);config.queryPort=(uint16_t)win32_arg(s,3);
++            config.serverMode=win32_arg(s,4);config.version=version.data();config.versionSize=(uint32_t)version.size();
++            ready=p.initGameServer(p.context,&config);
++        }
++    }
++    s.gpr.rax.dword=ready;win32_cdecl_ret(s);
++}
+ static void impl_SteamGameServer(State& s) { s.gpr.rax.dword = steam_iface_obj(IF_GAMESERVER); win32_cdecl_ret(s); }
+ // Nothing is queued for the game server; the server thread calls RunCallbacks every frame.
+-BINK_STUB(SteamGameServer_RunCallbacks)
+-BINK_STUB(SteamGameServer_Shutdown)
++static void impl_SteamGameServer_RunCallbacks(State& s) {
++    const auto p=bo2_ios_steam_provider_snapshot();
++    if (p.context && p.pollGameServerEvent) {
++        BO2SteamServerEvent event{};
++        for (unsigned n=0;n<128 && p.pollGameServerEvent(p.context,&event)==1;++n) {
++            std::vector<uint32_t> listeners;
++            {
++                std::lock_guard<std::mutex> lock(g_native_callback_mutex);
++                for (const auto &entry:g_native_callbacks)
++                    if (entry.second.server && entry.second.id==event.callbackID) listeners.push_back(entry.first);
++            }
++            for (uint32_t callback:listeners) {
++                {
++                    std::lock_guard<std::mutex> lock(g_native_callback_mutex);
++                    if (g_native_callbacks.find(callback)==g_native_callbacks.end()) continue;
++                }
++                const bool ok=bo2SteamDeliverServerEvent(s.gpr.rsp.dword,s.gpr.rcx.dword,callback,event,
++                    [](uint32_t address,uint32_t value){win32_mem_write32(address,value);},
++                    [](uint32_t address){return win32_mem_read32(address);},
++                    [&](uint32_t va){return win32_run_lifted(&s,va);});
++                fprintf(stderr,"[STEAM-SERVER-CALLBACK] id=%u result=%u secure=%u delivered=%d\n",
++                    event.callbackID,event.result,event.secure,ok);
++            }
++        }
++    }
++    win32_cdecl_ret(s);
++}
++static void impl_SteamGameServer_Shutdown(State& s) {
++    const auto p=bo2_ios_steam_provider_snapshot();
++    if (p.context && p.shutdownGameServer) p.shutdownGameServer(p.context);
++    win32_cdecl_ret(s);
++}
+ 
+ // Decode a Steam vtable-method sentinel and answer it. Returns false if `addr`
+ // is not a Steam sentinel (caller continues normal dispatch).
+@@ -2156,16 +2257,102 @@
+     uint32_t esp = s.gpr.rsp.dword;
+     // thiscall: callee cleans args; return `rax` and pop retaddr + nargs*4.
+     auto ret = [&](uint32_t rax, int nargs) {
++        if (steam_trace_enabled()) {
++            uint32_t length = 0;
++            if (iface == IF_USER && (slot == 13 || slot == 14 || slot == 20 || slot == 21)) length = win32_mem_read32(esp + 8);
++            else if (iface == IF_NETWORKING && slot == 0) length = win32_mem_read32(esp + 16);
++            else if (iface == IF_NETWORKING && slot == 2) length = win32_mem_read32(esp + 8);
++            else if (iface == IF_GAMESERVER && slot == 24) length = win32_mem_read32(esp + 12);
++            else if (iface == IF_GAMESERVER && (slot == 28 || slot == 29)) length = win32_mem_read32(esp + 8);
++            steam_trace_event(iface, slot, nargs, length, 0, rax);
++        }
+         s.gpr.rax.dword = rax;
+         s.gpr.rsp.dword = esp + 4 + (uint32_t)nargs * 4;
+     };
+ 
++    const auto provider=bo2_ios_steam_provider_snapshot();
++    if (provider.context) {
++        if (iface==IF_USER && slot==1) { ret(provider.isLoggedOn(provider.context),0); return true; }
++        if (iface==IF_USER && slot==2) {
++            const uint64_t id=provider.steamID(provider.context);
++            const uint32_t out=win32_mem_read32(esp+4);
++            win32_mem_write32(out,(uint32_t)id); win32_mem_write32(out+4,(uint32_t)(id>>32));
++            ret(out,1); return true;
++        }
++        if (iface==IF_APPS && slot==3) {
++            const int32_t status=provider.vacStatus(provider.context,kSteamAppId);
++            if (status<0) steam_reel_refus("Steam account security status became unavailable; stopping this session.");
++            ret(status==1,0); return true;
++        }
++        if (iface==IF_APPS && slot==0) { ret(provider.ownsApp(provider.context,kSteamAppId),0); return true; }
++        if (iface==IF_APPS && slot==6) { ret(provider.ownsApp(provider.context,win32_mem_read32(esp+4)),1); return true; }
++        if (iface==IF_APPS && slot==7) { ret(provider.dlcInstalled(provider.context,win32_mem_read32(esp+4)),1); return true; }
++        if (iface==IF_UTILS && slot==9) { ret(kSteamAppId,0); return true; }
++        if (iface==IF_USER && slot==20) {
++            const uint32_t data=win32_mem_read32(esp+4),size=win32_mem_read32(esp+8);
++            uint64_t call=0;
++            if (size<=65536 && (data || !size)) {
++                std::vector<uint8_t> copy(size);
++                for (uint32_t i=0;i<size;++i) copy[i]=win32_mem_read8(data+i);
++                call=g_native_steam_calls.request(copy.data(),size);
++            }
++            fprintf(stderr,"[STEAM-TICKET] native request bytes=%u accepted=%d\n",size,call!=0);
++            s.gpr.rdx.dword=(uint32_t)(call>>32); ret((uint32_t)call,2); return true;
++        }
++        if (iface==IF_USER && slot==21) {
++            const uint32_t out=win32_mem_read32(esp+4),capacity=win32_mem_read32(esp+8),size=win32_mem_read32(esp+12);
++            uint32_t required=0,result=0;
++            std::vector<uint8_t> copy(std::min(capacity,65536u));
++            const int state=g_native_steam_calls.copyTicket(out ? copy.data() : nullptr,
++                out ? (uint32_t)copy.size() : 0,&required,&result);
++            if (size) win32_mem_write32(size,required);
++            const bool ready=state==BO2_STEAM_READY && out && size;
++            if (ready) for (uint32_t i=0;i<required;++i) win32_mem_write8(out+i,copy[i]);
++            fprintf(stderr,"[STEAM-TICKET] native read required=%u result=%u ready=%d\n",required,result,ready);
++            ret(ready,3); return true;
++        }
++        // A game-server identity is distinct from the player's identity. These
++        // operations remain unavailable until the genuine server session exists.
++        if (iface==IF_GAMESERVER && slot==0) { ret(0,6); return true; }
++        if (iface==IF_GAMESERVER && slot==4) {
++            if (provider.setDedicatedServer) provider.setDedicatedServer(provider.context,win32_mem_read32(esp+4)!=0);
++            ret(0,1);return true;
++        }
++        if (iface==IF_GAMESERVER && slot==6) {
++            if (provider.logOnAnonymous) provider.logOnAnonymous(provider.context);
++            ret(0,0);return true;
++        }
++        if (iface==IF_GAMESERVER && slot==8) {
++            ret(provider.gameServerLoggedOn && provider.gameServerLoggedOn(provider.context),0);return true;
++        }
++        if (iface==IF_GAMESERVER && slot==9) {
++            ret(provider.gameServerSecure && provider.gameServerSecure(provider.context)==1,0);return true;
++        }
++        if (iface==IF_GAMESERVER && slot==36) {
++            ret(provider.gameServerPublicIP ? provider.gameServerPublicIP(provider.context) : 0,0);return true;
++        }
++        if (iface==IF_GAMESERVER && slot==24) {
++            // The observed local call has a zero-byte authentication blob.
++            // No account identity or approval can be inferred from it. Nonempty
++            // authentication remains unavailable until its real flow is captured.
++            const uint32_t out=win32_mem_read32(esp+16);
++            if (out) {win32_mem_write32(out,0);win32_mem_write32(out+4,0);}
++            ret(0,4);return true;
++        }
++        if (iface==IF_GAMESERVER && slot==10) {
++            const uint64_t id=provider.gameServerSteamID ? provider.gameServerSteamID(provider.context) : 0;
++            const uint32_t out=win32_mem_read32(esp+4);
++            win32_mem_write32(out,(uint32_t)id);win32_mem_write32(out+4,(uint32_t)(id>>32));ret(out,1);return true;
++        }
++        // Unknown live interfaces must not initialize the receipt-backed cache.
++    }
++
+     // ISteamUser::BLoggedOn() (slot 1): the player's Steam answers. 0 args.
+-    if (iface == IF_USER && slot == 1) { const SteamReel& r = steam_reel(); ret(r.logged(r.user), 0); return true; }
++    if (!provider.context && iface == IF_USER && slot == 1) { const SteamReel& r = steam_reel(); ret(r.logged(r.user), 0); return true; }
+ 
+     // Steam réel : l'identité, l'abonnement et les DLC viennent de Steam (ISteamApps : 0 BIsSubscribed,
+     // 6 BIsSubscribedApp(appid), 7 BIsDlcInstalled(appid)).
+-    {
++    if (!provider.context) {
+         const SteamReel& r = steam_reel();
+         if ((iface == IF_USER && slot == 2) || (iface == IF_GAMESERVER && slot == 10)) {
+             const uint32_t out = win32_mem_read32(esp + 4);
+@@ -2188,8 +2375,8 @@
+     if (iface == IF_GAMESERVER && slot == 0) { ret(1, 6); return true; }
+     // ISteamUserStats011: RequestCurrentStats (slot 0) is false only when no user is logged on (Steamworks
+     // documentation); StoreStats (slot 10) is asked to the player's Steam.
+-    if (iface == IF_USERSTATS && slot == 0) { const SteamReel& r = steam_reel(); ret(r.logged(r.user), 0); return true; }
+-    if (iface == IF_USERSTATS && slot == 10) { const SteamReel& r = steam_reel(); ret(r.store(r.stats), 0); return true; }
++    if (iface == IF_USERSTATS && slot == 0) { ret(provider.context ? 0 : steam_reel().logged(steam_reel().user),0); return true; }
++    if (iface == IF_USERSTATS && slot == 10) { ret(provider.context ? 0 : steam_reel().store(steam_reel().stats),0); return true; }
+     if (iface == IF_FRIENDS && slot == 0) { ret(steam_persona_name(), 0); return true; }   // GetPersonaName
+     if (iface == IF_UTILS && slot == 9) { ret(g_steam_appid, 0); return true; }       // GetAppID
+     // ISteamUser016::RequestEncryptedAppTicket (slot 20) and GetEncryptedAppTicket (slot 21): see g_steam_app_ticket.
+@@ -2973,36 +3160,8 @@
+                      : strstr(fichier, "steam://run/202990") ? "multi" : nullptr;
+     fprintf(stderr, "[SHELLEXEC] \"%.200s\" -> %s\n", fichier, mode ? mode : "non servi");
+     if (!mode) return false;
+-    // Environnement vide : les BO2_* de ce jeu (tubes, fils heberges, leviers des Zombies) ne valent pas pour l'autre. Passent
+-    // seulement le choix du panneau, le nom du joueur et le HUD Metal (scripts/launch.sh).
+-    std::string garde;
+-    for (const char* v : {"BO2_PANNEAU", "BO2_NAME", "MTL_HUD_ENABLED", "BO2_TITRE"})
+-        if (const char* x = getenv(v)) garde += std::string(v) + "='" + x + "' ";
+-    const char* lanceur = "scripts/play_steam.sh";   // le build Steam reste sur les executables Steam
+-    mode = mode[0] == 'c' ? "sp" : mode[0] == 'z' ? "zm" : "mp";
+-    char cmd[1024];
+-    snprintf(cmd, sizeof cmd, "(while kill -0 %d 2>/dev/null; do sleep 1; done; pkill -f scripts/panel.py; "
+-             "exec env -i HOME=\"$HOME\" PATH=\"$PATH\" USER=\"$USER\" TMPDIR=\"$TMPDIR\" %s %s %s) "
+-             ">/dev/null 2>&1 &", (int)getpid(), garde.c_str(), lanceur, mode);
+-    // posix_spawn sans attente, pas system() : lance depuis l'app, system() a rendu une erreur sans rien ouvrir (10-22).
+-    pid_t pid;
+-    char* argv[] = {(char*)"/bin/sh", (char*)"-c", cmd, nullptr};
+-    // CLOEXEC_DEFAULT : le relais n'herite que de 0/1/2 (vers /dev/null). Il heritait des milliers de descripteurs du
+-    // jeu : « cannot make pipe for command substitution: Too many open files » dans launch.sh, cd vers /, rien ne
+-    // s'ouvrait (24/10) ; un autre essai, dyld abandonne dans CacheFinder (cache partage non ouvrable).
+-    posix_spawn_file_actions_t fa;
+-    posix_spawn_file_actions_init(&fa);
+-    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+-    posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+-    posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+-    posix_spawnattr_t at;
+-    posix_spawnattr_init(&at);
+-    posix_spawnattr_setflags(&at, POSIX_SPAWN_SETSID | POSIX_SPAWN_CLOEXEC_DEFAULT);   // hors de la session du jeu
+-    const int rc = posix_spawn(&pid, "/bin/sh", &fa, &at, argv, environ);
+-    posix_spawnattr_destroy(&at);
+-    posix_spawn_file_actions_destroy(&fa);
+-    if (rc != 0) fprintf(stderr, "[SHELLEXEC] relais non lance : %s\n", strerror(rc));
+-    return true;
++    extern bool ios_request_mode(const char*);
++    return ios_request_mode(mode);
+ }
+ static void impl_ShellExecuteA(State& s) {
+     const uint32_t f = win32_arg(s, 2);
+@@ -3558,8 +3717,8 @@
+                 uint32_t d = arg(1);
+                 if (d) {
+                     for (int i = 0; i < 11; i++) win32_mem_write32(d + i * 4, 0);
+-                    win32_mem_write32(d + 0, 1920);   // Width
+-                    win32_mem_write32(d + 4, 1080);   // Height
++                    win32_mem_write32(d + 0, kGuestMonitorW);   // Width
++                    win32_mem_write32(d + 4, kGuestMonitorH);   // Height
+                     win32_mem_write32(d + 8, 1);      // MipLevels
+                     win32_mem_write32(d + 12, 1);     // ArraySize
+                     win32_mem_write32(d + 16, 87);    // Format B8G8R8A8_UNORM
+@@ -3889,8 +4048,8 @@
+         uint32_t d = arg(1);
+         if (d) {
+             for (int i = 0; i < 28; i++) win32_mem_write32(d + i * 4, 0);
+-            win32_mem_write32(d + 0, 1920);        // BufferDesc.Width
+-            win32_mem_write32(d + 4, 1080);        // BufferDesc.Height
++            win32_mem_write32(d + 0, kGuestMonitorW);        // BufferDesc.Width
++            win32_mem_write32(d + 4, kGuestMonitorH);        // BufferDesc.Height
+             win32_mem_write32(d + 8, 60);          // RefreshRate.Numerator
+             win32_mem_write32(d + 12, 1);          // RefreshRate.Denominator
+             win32_mem_write32(d + 16, 87);         // Format B8G8R8A8_UNORM
+@@ -4908,7 +5067,7 @@
+                 uint32_t pm = arg(5);
+                 // GEOMETRY CAPTURE: a tracked buffer maps to ITS OWN backing so
+                 // VB/IB don't alias; everything else keeps the shared scratch.
+-                uint32_t data = map_scratch, pitch = 1920 * 4;
++                uint32_t data = map_scratch, pitch = kGuestMonitorW * 4;
+                 // A DYNAMIC TEXTURE gets its own backing and its REAL row pitch.
+                 // The shared scratch with a hardcoded 1920*4 pitch was fine for
+                 // buffers and silently wrong for textures: the guest wrote each
+@@ -5042,7 +5201,7 @@
+                 if (pm) {
+                     win32_mem_write32(pm + 0, data);               // pData
+                     win32_mem_write32(pm + 4, pitch);              // RowPitch
+-                    win32_mem_write32(pm + 8, pitch * 1080);       // DepthPitch
++                    win32_mem_write32(pm + 8, pitch * kGuestMonitorH);       // DepthPitch
+                 }
+                 break; }
+             case 15: {                           // Unmap(pRes, Subresource)
+@@ -5736,6 +5895,8 @@
+ // dispatched by name). No additional stub needed.
+ 
+ // --- REGISTRATION ---
++
++
+ static const ImportEntry remaining_dlls_impls[] = {
+     // GDI32
+     {"DeleteDC", impl_DeleteDC},
+@@ -5854,20 +6015,20 @@
+     // unregistered fell through to the default stub (pops just the retaddr),
+     // which leaked each call's args and cascaded into IAT-sentinel corruption.
+     // wsock32 forwards to ws2_32, so both share the standard ordinal numbering.
+-    {"WSOCK32_dll!Ordinal_2",   impl_wsock_ordinal_2},    // bind(3)
+-    {"WSOCK32_dll!Ordinal_3",   impl_wsock_ordinal_3},    // closesocket(1)
++    {"WSOCK32_dll!Ordinal_2", impl_wsock_ordinal_2},    // bind(3)
++    {"WSOCK32_dll!Ordinal_3", impl_wsock_ordinal_3},    // closesocket(1)
+     {"WSOCK32_dll!Ordinal_9",   impl_wsock_ordinal_9},    // htons(1)
+     {"WSOCK32_dll!Ordinal_10",  impl_wsock_ordinal_10},   // inet_addr(1)
+-    {"WSOCK32_dll!Ordinal_12",  impl_wsock_ordinal_12},   // ioctlsocket(3)
+-    {"WSOCK32_dll!Ordinal_16",  impl_wsock_ordinal_16},   // recv(4)
+-    {"WSOCK32_dll!Ordinal_17",  impl_wsock_ordinal_17},   // recvfrom(6)
+-    {"WSOCK32_dll!Ordinal_18",  impl_wsock_ordinal_18},   // select(5)
+-    {"WSOCK32_dll!Ordinal_19",  impl_wsock_ordinal_19},   // send(4)
+-    {"WSOCK32_dll!Ordinal_20",  impl_wsock_ordinal_20},   // sendto(6)
+-    {"WSOCK32_dll!Ordinal_21",  impl_wsock_ordinal_21},   // setsockopt(5)
+-    {"WSOCK32_dll!Ordinal_22",  impl_wsock_ordinal_22},   // shutdown(2)
+-    {"WSOCK32_dll!Ordinal_23",  impl_wsock_ordinal_23},   // socket(3)
+-    {"WSOCK32_dll!Ordinal_52",  impl_wsock_ordinal_52},   // gethostbyname(1)
++    {"WSOCK32_dll!Ordinal_12", impl_wsock_ordinal_12},   // ioctlsocket(3)
++    {"WSOCK32_dll!Ordinal_16", impl_wsock_ordinal_16},   // recv(4)
++    {"WSOCK32_dll!Ordinal_17", impl_wsock_ordinal_17},   // recvfrom(6)
++    {"WSOCK32_dll!Ordinal_18", impl_wsock_ordinal_18},   // select(5)
++    {"WSOCK32_dll!Ordinal_19", impl_wsock_ordinal_19},   // send(4)
++    {"WSOCK32_dll!Ordinal_20", impl_wsock_ordinal_20},   // sendto(6)
++    {"WSOCK32_dll!Ordinal_21", impl_wsock_ordinal_21},   // setsockopt(5)
++    {"WSOCK32_dll!Ordinal_22", impl_wsock_ordinal_22},   // shutdown(2)
++    {"WSOCK32_dll!Ordinal_23", impl_wsock_ordinal_23},   // socket(3)
++    {"WSOCK32_dll!Ordinal_52", impl_wsock_ordinal_52},   // gethostbyname(1)
+     {"WSOCK32_dll!Ordinal_57",  impl_wsock_ordinal_57},   // gethostname(2)
+     {"WSOCK32_dll!Ordinal_111", impl_wsock_ordinal_111},  // WSAGetLastError(0)
+     {"WSOCK32_dll!Ordinal_115", impl_wsock_ordinal_115},  // WSAStartup(2)
+@@ -5876,18 +6037,61 @@
+     {"WSOCK32_dll!Ordinal_14",  impl_wsock_ordinal_14},   // ntohl(1)
+     {"WSOCK32_dll!Ordinal_15",  impl_wsock_ordinal_15},   // ntohs(1)
+     {"WSOCK32_dll!Ordinal_116", impl_wsock_ordinal_116},  // WSACleanup(0)
+-    {"WSOCK32_dll!Ordinal_4",   impl_wsock_ordinal_4},    // connect(3)
+-    {"WS2_32_dll!Ordinal_4",    impl_wsock_ordinal_4},    // connect(3) : t6sp l'importe de WS2_32 (P928)
+-    {"WS2_32_dll!Ordinal_6",    impl_ws2_ordinal_6},      // getsockname(3)
++    {"WSOCK32_dll!Ordinal_4", impl_wsock_ordinal_4},    // connect(3)
++    {"WS2_32_dll!Ordinal_4", impl_wsock_ordinal_4},    // connect(3) : t6sp l'importe de WS2_32 (P928)
++    {"WS2_32_dll!Ordinal_6", impl_ws2_ordinal_6},      // getsockname(3)
+     {"WS2_32_dll!Ordinal_12",   impl_ws2_ordinal_12},     // ioctlsocket(3)
+     // inet_ntoa(1) : les exes Steam l'importent de WSOCK32 (ordinal 11). Sans elle, chaîne
+     // illisible (« Binding to ﾭ� ») puis tableau des hôtes STUN détruit sur un slot d'import (P973).
+     {"WSOCK32_dll!Ordinal_11",  impl_ws2_ordinal_12},
+     {"WS2_32_dll!Ordinal_15",   impl_ws2_ordinal_15},     // ntohs(1)
+-    {"WS2_32_dll!Ordinal_112",  impl_ws2_ordinal_112},    // WSASetLastError(1)
++    {"WS2_32_dll!Ordinal_112", impl_ws2_ordinal_112},    // WSASetLastError(1)
+     {nullptr, nullptr},
+ };
+ 
++#ifdef BO2_NATIVE_WINSOCK
++void bo2_dw_online_call(State&, unsigned, unsigned);
++template<unsigned number, unsigned count>
++static void native_socket(State& state) { bo2_dw_online_call(state, number, count); }
++static const ImportEntry native_socket_imports[] = {
++    {"WSOCK32_dll!Ordinal_2", native_socket<2, 3>},
++    {"WSOCK32_dll!Ordinal_3", native_socket<3, 1>},
++    {"WSOCK32_dll!Ordinal_12", native_socket<12, 3>},
++    {"WSOCK32_dll!Ordinal_16", native_socket<16, 4>},
++    {"WSOCK32_dll!Ordinal_17", native_socket<17, 6>},
++    {"WSOCK32_dll!Ordinal_18", native_socket<18, 5>},
++    {"WSOCK32_dll!Ordinal_19", native_socket<19, 4>},
++    {"WSOCK32_dll!Ordinal_20", native_socket<20, 6>},
++    {"WSOCK32_dll!Ordinal_21", native_socket<21, 5>},
++    {"WSOCK32_dll!Ordinal_22", native_socket<22, 2>},
++    {"WSOCK32_dll!Ordinal_23", native_socket<23, 3>},
++    {"WSOCK32_dll!Ordinal_52", native_socket<52, 1>},
++    {"WSOCK32_dll!Ordinal_111", native_socket<111, 0>},
++    {"WSOCK32_dll!Ordinal_4", native_socket<4, 3>},
++    {"WS2_32_dll!Ordinal_4", native_socket<4, 3>},
++    {"WS2_32_dll!Ordinal_6", native_socket<6, 3>},
++    {"WS2_32_dll!Ordinal_112", native_socket<112, 1>},
++};
++#endif
+ extern "C" const ImportEntry* get_remaining_dlls_impls() {
++#ifdef BO2_NATIVE_WINSOCK
++    static const bool online = [] {
++        const char* mode = std::getenv("BO2_DW_TRANSPORT");
++        return mode && std::strcmp(mode, "online") == 0;
++    }();
++    if (online) {
++        static const auto imports = [] {
++            std::vector<ImportEntry> table(std::begin(remaining_dlls_impls), std::end(remaining_dlls_impls));
++            for (auto& entry : table) {
++                if (!entry.name) break;
++                for (const auto& route : native_socket_imports)
++                    if (std::strcmp(entry.name, route.name) == 0) { entry.impl = route.impl; break; }
++            }
++            return table;
++        }();
++        return imports.data();
++    }
++#endif
++
+     return remaining_dlls_impls;
+ }
+diff -ruN a/runtime/win32/steam_abi_generated.h b/runtime/win32/steam_abi_generated.h
+--- a/runtime/win32/steam_abi_generated.h	1969-12-31 16:00:00
++++ b/runtime/win32/steam_abi_generated.h	2026-11-10 12:41:10
+@@ -0,0 +1,267 @@
++// Generated API metadata; do not edit. No argument values or buffers.
++// Source: ValveSoftware/source-sdk-2013 at 39ed875, mp/src/public/steam.
++#pragma once
++#include <cstddef>
++namespace steam_abi {
++struct Entry { const char *version, *method, *declaration, *resultCategory;
++               unsigned stackWords; bool legacyImplemented; };
++static constexpr Entry kUser[] = {
++  {"SteamUser016","GetHSteamUser","HSteamUser GetHSteamUser()","scalar",0,false},
++  {"SteamUser016","BLoggedOn","bool BLoggedOn()","bool",0,true},
++  {"SteamUser016","GetSteamID","CSteamID GetSteamID()","struct-return",1,true},
++  {"SteamUser016","InitiateGameConnection","int InitiateGameConnection( void *pAuthBlob, int cbMaxAuthBlob, CSteamID steamIDGameServer, uint32 unIPServer, uint16 usPortServer, bool bSecure )","scalar",7,false},
++  {"SteamUser016","TerminateGameConnection","void TerminateGameConnection( uint32 unIPServer, uint16 usPortServer )","void",2,false},
++  {"SteamUser016","TrackAppUsageEvent","void TrackAppUsageEvent( CGameID gameID, int eAppUsageEvent, const char *pchExtraInfo = \"\" )","void",4,false},
++  {"SteamUser016","GetUserDataFolder","bool GetUserDataFolder( char *pchBuffer, int cubBuffer )","bool",2,false},
++  {"SteamUser016","StartVoiceRecording","void StartVoiceRecording( )","void",0,false},
++  {"SteamUser016","StopVoiceRecording","void StopVoiceRecording( )","void",0,false},
++  {"SteamUser016","GetAvailableVoice","EVoiceResult GetAvailableVoice(uint32 *pcbCompressed, uint32 *pcbUncompressed, uint32 nUncompressedVoiceDesiredSampleRate)","scalar",3,false},
++  {"SteamUser016","GetVoice","EVoiceResult GetVoice( bool bWantCompressed, void *pDestBuffer, uint32 cbDestBufferSize, uint32 *nBytesWritten, bool bWantUncompressed, void *pUncompressedDestBuffer, uint32 cbUncompressedDestBufferSize, uint32 *nUncompressBytesWritten, uint32 nUncompressedVoiceDesiredSampleRate )","scalar",9,false},
++  {"SteamUser016","DecompressVoice","EVoiceResult DecompressVoice( const void *pCompressed, uint32 cbCompressed, void *pDestBuffer, uint32 cbDestBufferSize, uint32 *nBytesWritten, uint32 nDesiredSampleRate )","scalar",6,false},
++  {"SteamUser016","GetVoiceOptimalSampleRate","uint32 GetVoiceOptimalSampleRate()","scalar",0,false},
++  {"SteamUser016","GetAuthSessionTicket","HAuthTicket GetAuthSessionTicket( void *pTicket, int cbMaxTicket, uint32 *pcbTicket )","scalar",3,false},
++  {"SteamUser016","BeginAuthSession","EBeginAuthSessionResult BeginAuthSession( const void *pAuthTicket, int cbAuthTicket, CSteamID steamID )","scalar",4,false},
++  {"SteamUser016","EndAuthSession","void EndAuthSession( CSteamID steamID )","void",2,false},
++  {"SteamUser016","CancelAuthTicket","void CancelAuthTicket( HAuthTicket hAuthTicket )","void",1,false},
++  {"SteamUser016","UserHasLicenseForApp","EUserHasLicenseForAppResult UserHasLicenseForApp( CSteamID steamID, AppId_t appID )","scalar",3,false},
++  {"SteamUser016","BIsBehindNAT","bool BIsBehindNAT()","bool",0,false},
++  {"SteamUser016","AdvertiseGame","void AdvertiseGame( CSteamID steamIDGameServer, uint32 unIPServer, uint16 usPortServer )","void",4,false},
++  {"SteamUser016","RequestEncryptedAppTicket","SteamAPICall_t RequestEncryptedAppTicket( void *pDataToInclude, int cbDataToInclude )","uint64",2,true},
++  {"SteamUser016","GetEncryptedAppTicket","bool GetEncryptedAppTicket( void *pTicket, int cbMaxTicket, uint32 *pcbTicket )","bool",3,true},
++};
++static constexpr Entry kUtils[] = {
++  {"SteamUtils005","GetSecondsSinceAppActive","uint32 GetSecondsSinceAppActive()","scalar",0,false},
++  {"SteamUtils005","GetSecondsSinceComputerActive","uint32 GetSecondsSinceComputerActive()","scalar",0,false},
++  {"SteamUtils005","GetConnectedUniverse","EUniverse GetConnectedUniverse()","scalar",0,false},
++  {"SteamUtils005","GetServerRealTime","uint32 GetServerRealTime()","scalar",0,false},
++  {"SteamUtils005","GetIPCountry","const char *GetIPCountry()","pointer",0,false},
++  {"SteamUtils005","GetImageSize","bool GetImageSize( int iImage, uint32 *pnWidth, uint32 *pnHeight )","bool",3,false},
++  {"SteamUtils005","GetImageRGBA","bool GetImageRGBA( int iImage, uint8 *pubDest, int nDestBufferSize )","bool",3,false},
++  {"SteamUtils005","GetCSERIPPort","bool GetCSERIPPort( uint32 *unIP, uint16 *usPort )","bool",2,false},
++  {"SteamUtils005","GetCurrentBatteryPower","uint8 GetCurrentBatteryPower()","scalar",0,false},
++  {"SteamUtils005","GetAppID","uint32 GetAppID()","scalar",0,true},
++  {"SteamUtils005","SetOverlayNotificationPosition","void SetOverlayNotificationPosition( ENotificationPosition eNotificationPosition )","void",1,false},
++  {"SteamUtils005","IsAPICallCompleted","bool IsAPICallCompleted( SteamAPICall_t hSteamAPICall, bool *pbFailed )","bool",3,false},
++  {"SteamUtils005","GetAPICallFailureReason","ESteamAPICallFailure GetAPICallFailureReason( SteamAPICall_t hSteamAPICall )","scalar",2,false},
++  {"SteamUtils005","GetAPICallResult","bool GetAPICallResult( SteamAPICall_t hSteamAPICall, void *pCallback, int cubCallback, int iCallbackExpected, bool *pbFailed )","bool",6,false},
++  {"SteamUtils005","RunFrame","void RunFrame()","void",0,false},
++  {"SteamUtils005","GetIPCCallCount","uint32 GetIPCCallCount()","scalar",0,false},
++  {"SteamUtils005","SetWarningMessageHook","void SetWarningMessageHook( SteamAPIWarningMessageHook_t pFunction )","void",1,false},
++  {"SteamUtils005","IsOverlayEnabled","bool IsOverlayEnabled()","bool",0,false},
++  {"SteamUtils005","BOverlayNeedsPresent","bool BOverlayNeedsPresent()","bool",0,false},
++  {"SteamUtils005","CheckFileSignature","SteamAPICall_t CheckFileSignature( const char *szFileName )","uint64",1,false},
++  {"SteamUtils005","ShowGamepadTextInput","bool ShowGamepadTextInput( EGamepadTextInputMode eInputMode, EGamepadTextInputLineMode eLineInputMode, const char *pchDescription, uint32 unCharMax )","bool",4,false},
++  {"SteamUtils005","GetEnteredGamepadTextLength","uint32 GetEnteredGamepadTextLength()","scalar",0,false},
++  {"SteamUtils005","GetEnteredGamepadTextInput","bool GetEnteredGamepadTextInput( char *pchText, uint32 cchText )","bool",2,false},
++};
++static constexpr Entry kUserStats[] = {
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","RequestCurrentStats","bool RequestCurrentStats()","bool",0,true},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetStat","bool GetStat( const char *pchName, int32 *pData )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetStat","bool GetStat( const char *pchName, float *pData )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","SetStat","bool SetStat( const char *pchName, int32 nData )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","SetStat","bool SetStat( const char *pchName, float fData )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","UpdateAvgRateStat","bool UpdateAvgRateStat( const char *pchName, float flCountThisSession, double dSessionLength )","bool",4,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetAchievement","bool GetAchievement( const char *pchName, bool *pbAchieved )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","SetAchievement","bool SetAchievement( const char *pchName )","bool",1,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","ClearAchievement","bool ClearAchievement( const char *pchName )","bool",1,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetAchievementAndUnlockTime","bool GetAchievementAndUnlockTime( const char *pchName, bool *pbAchieved, uint32 *punUnlockTime )","bool",3,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","StoreStats","bool StoreStats()","bool",0,true},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetAchievementIcon","int GetAchievementIcon( const char *pchName )","scalar",1,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetAchievementDisplayAttribute","const char *GetAchievementDisplayAttribute( const char *pchName, const char *pchKey )","pointer",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","IndicateAchievementProgress","bool IndicateAchievementProgress( const char *pchName, uint32 nCurProgress, uint32 nMaxProgress )","bool",3,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetNumAchievements","uint32 GetNumAchievements()","scalar",0,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetAchievementName","const char *GetAchievementName( uint32 iAchievement )","pointer",1,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","RequestUserStats","SteamAPICall_t RequestUserStats( CSteamID steamIDUser )","uint64",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetUserStat","bool GetUserStat( CSteamID steamIDUser, const char *pchName, int32 *pData )","bool",4,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetUserStat","bool GetUserStat( CSteamID steamIDUser, const char *pchName, float *pData )","bool",4,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetUserAchievement","bool GetUserAchievement( CSteamID steamIDUser, const char *pchName, bool *pbAchieved )","bool",4,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetUserAchievementAndUnlockTime","bool GetUserAchievementAndUnlockTime( CSteamID steamIDUser, const char *pchName, bool *pbAchieved, uint32 *punUnlockTime )","bool",5,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","ResetAllStats","bool ResetAllStats( bool bAchievementsToo )","bool",1,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","FindOrCreateLeaderboard","SteamAPICall_t FindOrCreateLeaderboard( const char *pchLeaderboardName, ELeaderboardSortMethod eLeaderboardSortMethod, ELeaderboardDisplayType eLeaderboardDisplayType )","uint64",3,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","FindLeaderboard","SteamAPICall_t FindLeaderboard( const char *pchLeaderboardName )","uint64",1,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetLeaderboardName","const char *GetLeaderboardName( SteamLeaderboard_t hSteamLeaderboard )","pointer",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetLeaderboardEntryCount","int GetLeaderboardEntryCount( SteamLeaderboard_t hSteamLeaderboard )","scalar",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetLeaderboardSortMethod","ELeaderboardSortMethod GetLeaderboardSortMethod( SteamLeaderboard_t hSteamLeaderboard )","scalar",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetLeaderboardDisplayType","ELeaderboardDisplayType GetLeaderboardDisplayType( SteamLeaderboard_t hSteamLeaderboard )","scalar",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","DownloadLeaderboardEntries","SteamAPICall_t DownloadLeaderboardEntries( SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, int nRangeStart, int nRangeEnd )","uint64",5,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","DownloadLeaderboardEntriesForUsers","SteamAPICall_t DownloadLeaderboardEntriesForUsers( SteamLeaderboard_t hSteamLeaderboard, CSteamID *prgUsers, int cUsers )","uint64",4,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetDownloadedLeaderboardEntry","bool GetDownloadedLeaderboardEntry( SteamLeaderboardEntries_t hSteamLeaderboardEntries, int index, LeaderboardEntry_t *pLeaderboardEntry, int32 *pDetails, int cDetailsMax )","bool",6,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","UploadLeaderboardScore","SteamAPICall_t UploadLeaderboardScore( SteamLeaderboard_t hSteamLeaderboard, ELeaderboardUploadScoreMethod eLeaderboardUploadScoreMethod, int32 nScore, const int32 *pScoreDetails, int cScoreDetailsCount )","uint64",6,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","AttachLeaderboardUGC","SteamAPICall_t AttachLeaderboardUGC( SteamLeaderboard_t hSteamLeaderboard, UGCHandle_t hUGC )","uint64",4,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetNumberOfCurrentPlayers","SteamAPICall_t GetNumberOfCurrentPlayers()","uint64",0,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","RequestGlobalAchievementPercentages","SteamAPICall_t RequestGlobalAchievementPercentages()","uint64",0,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetMostAchievedAchievementInfo","int GetMostAchievedAchievementInfo( char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved )","scalar",4,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetNextMostAchievedAchievementInfo","int GetNextMostAchievedAchievementInfo( int iIteratorPrevious, char *pchName, uint32 unNameBufLen, float *pflPercent, bool *pbAchieved )","scalar",5,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetAchievementAchievedPercent","bool GetAchievementAchievedPercent( const char *pchName, float *pflPercent )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","RequestGlobalStats","SteamAPICall_t RequestGlobalStats( int nHistoryDays )","uint64",1,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetGlobalStat","bool GetGlobalStat( const char *pchStatName, int64 *pData )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetGlobalStat","bool GetGlobalStat( const char *pchStatName, double *pData )","bool",2,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetGlobalStatHistory","int32 GetGlobalStatHistory( const char *pchStatName, int64 *pData, uint32 cubData )","scalar",3,false},
++  {"STEAMUSERSTATS_INTERFACE_VERSION011","GetGlobalStatHistory","int32 GetGlobalStatHistory( const char *pchStatName, double *pData, uint32 cubData )","scalar",3,false},
++};
++static constexpr Entry kApps[] = {
++  {"STEAMAPPS_INTERFACE_VERSION005","BIsSubscribed","bool BIsSubscribed()","bool",0,true},
++  {"STEAMAPPS_INTERFACE_VERSION005","BIsLowViolence","bool BIsLowViolence()","bool",0,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","BIsCybercafe","bool BIsCybercafe()","bool",0,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","BIsVACBanned","bool BIsVACBanned()","bool",0,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","GetCurrentGameLanguage","const char *GetCurrentGameLanguage()","pointer",0,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","GetAvailableGameLanguages","const char *GetAvailableGameLanguages()","pointer",0,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","BIsSubscribedApp","bool BIsSubscribedApp( AppId_t appID )","bool",1,true},
++  {"STEAMAPPS_INTERFACE_VERSION005","BIsDlcInstalled","bool BIsDlcInstalled( AppId_t appID )","bool",1,true},
++  {"STEAMAPPS_INTERFACE_VERSION005","GetEarliestPurchaseUnixTime","uint32 GetEarliestPurchaseUnixTime( AppId_t nAppID )","scalar",1,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","BIsSubscribedFromFreeWeekend","bool BIsSubscribedFromFreeWeekend()","bool",0,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","GetDLCCount","int GetDLCCount()","scalar",0,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","BGetDLCDataByIndex","bool BGetDLCDataByIndex( int iDLC, AppId_t *pAppID, bool *pbAvailable, char *pchName, int cchNameBufferSize )","bool",5,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","InstallDLC","void InstallDLC( AppId_t nAppID )","void",1,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","UninstallDLC","void UninstallDLC( AppId_t nAppID )","void",1,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","RequestAppProofOfPurchaseKey","void RequestAppProofOfPurchaseKey( AppId_t nAppID )","void",1,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","GetCurrentBetaName","bool GetCurrentBetaName( char *pchName, int cchNameBufferSize )","bool",2,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","MarkContentCorrupt","bool MarkContentCorrupt( bool bMissingFilesOnly )","bool",1,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","GetInstalledDepots","uint32 GetInstalledDepots( DepotId_t *pvecDepots, uint32 cMaxDepots )","scalar",2,false},
++  {"STEAMAPPS_INTERFACE_VERSION005","GetAppInstallDir","uint32 GetAppInstallDir( AppId_t appID, char *pchFolder, uint32 cchFolderBufferSize )","scalar",3,false},
++};
++static constexpr Entry kFriends[] = {
++  {"SteamFriends013","GetPersonaName","const char *GetPersonaName()","pointer",0,true},
++  {"SteamFriends013","SetPersonaName","SteamAPICall_t SetPersonaName( const char *pchPersonaName )","uint64",1,false},
++  {"SteamFriends013","GetPersonaState","EPersonaState GetPersonaState()","scalar",0,false},
++  {"SteamFriends013","GetFriendCount","int GetFriendCount( int iFriendFlags )","scalar",1,false},
++  {"SteamFriends013","GetFriendByIndex","CSteamID GetFriendByIndex( int iFriend, int iFriendFlags )","struct-return",3,false},
++  {"SteamFriends013","GetFriendRelationship","EFriendRelationship GetFriendRelationship( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","GetFriendPersonaState","EPersonaState GetFriendPersonaState( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","GetFriendPersonaName","const char *GetFriendPersonaName( CSteamID steamIDFriend )","pointer",2,false},
++  {"SteamFriends013","GetFriendGamePlayed","bool GetFriendGamePlayed( CSteamID steamIDFriend, FriendGameInfo_t *pFriendGameInfo )","bool",3,false},
++  {"SteamFriends013","GetFriendPersonaNameHistory","const char *GetFriendPersonaNameHistory( CSteamID steamIDFriend, int iPersonaName )","pointer",3,false},
++  {"SteamFriends013","HasFriend","bool HasFriend( CSteamID steamIDFriend, int iFriendFlags )","bool",3,false},
++  {"SteamFriends013","GetClanCount","int GetClanCount()","scalar",0,false},
++  {"SteamFriends013","GetClanByIndex","CSteamID GetClanByIndex( int iClan )","struct-return",2,false},
++  {"SteamFriends013","GetClanName","const char *GetClanName( CSteamID steamIDClan )","pointer",2,false},
++  {"SteamFriends013","GetClanTag","const char *GetClanTag( CSteamID steamIDClan )","pointer",2,false},
++  {"SteamFriends013","GetClanActivityCounts","bool GetClanActivityCounts( CSteamID steamIDClan, int *pnOnline, int *pnInGame, int *pnChatting )","bool",5,false},
++  {"SteamFriends013","DownloadClanActivityCounts","SteamAPICall_t DownloadClanActivityCounts( CSteamID *psteamIDClans, int cClansToRequest )","uint64",2,false},
++  {"SteamFriends013","GetFriendCountFromSource","int GetFriendCountFromSource( CSteamID steamIDSource )","scalar",2,false},
++  {"SteamFriends013","GetFriendFromSourceByIndex","CSteamID GetFriendFromSourceByIndex( CSteamID steamIDSource, int iFriend )","struct-return",4,false},
++  {"SteamFriends013","IsUserInSource","bool IsUserInSource( CSteamID steamIDUser, CSteamID steamIDSource )","bool",4,false},
++  {"SteamFriends013","SetInGameVoiceSpeaking","void SetInGameVoiceSpeaking( CSteamID steamIDUser, bool bSpeaking )","void",3,false},
++  {"SteamFriends013","ActivateGameOverlay","void ActivateGameOverlay( const char *pchDialog )","void",1,false},
++  {"SteamFriends013","ActivateGameOverlayToUser","void ActivateGameOverlayToUser( const char *pchDialog, CSteamID steamID )","void",3,false},
++  {"SteamFriends013","ActivateGameOverlayToWebPage","void ActivateGameOverlayToWebPage( const char *pchURL )","void",1,false},
++  {"SteamFriends013","ActivateGameOverlayToStore","void ActivateGameOverlayToStore( AppId_t nAppID, EOverlayToStoreFlag eFlag )","void",2,false},
++  {"SteamFriends013","SetPlayedWith","void SetPlayedWith( CSteamID steamIDUserPlayedWith )","void",2,false},
++  {"SteamFriends013","ActivateGameOverlayInviteDialog","void ActivateGameOverlayInviteDialog( CSteamID steamIDLobby )","void",2,false},
++  {"SteamFriends013","GetSmallFriendAvatar","int GetSmallFriendAvatar( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","GetMediumFriendAvatar","int GetMediumFriendAvatar( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","GetLargeFriendAvatar","int GetLargeFriendAvatar( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","RequestUserInformation","bool RequestUserInformation( CSteamID steamIDUser, bool bRequireNameOnly )","bool",3,false},
++  {"SteamFriends013","RequestClanOfficerList","SteamAPICall_t RequestClanOfficerList( CSteamID steamIDClan )","uint64",2,false},
++  {"SteamFriends013","GetClanOwner","CSteamID GetClanOwner( CSteamID steamIDClan )","struct-return",3,false},
++  {"SteamFriends013","GetClanOfficerCount","int GetClanOfficerCount( CSteamID steamIDClan )","scalar",2,false},
++  {"SteamFriends013","GetClanOfficerByIndex","CSteamID GetClanOfficerByIndex( CSteamID steamIDClan, int iOfficer )","struct-return",4,false},
++  {"SteamFriends013","GetUserRestrictions","uint32 GetUserRestrictions()","scalar",0,false},
++  {"SteamFriends013","SetRichPresence","bool SetRichPresence( const char *pchKey, const char *pchValue )","bool",2,false},
++  {"SteamFriends013","ClearRichPresence","void ClearRichPresence()","void",0,false},
++  {"SteamFriends013","GetFriendRichPresence","const char *GetFriendRichPresence( CSteamID steamIDFriend, const char *pchKey )","pointer",3,false},
++  {"SteamFriends013","GetFriendRichPresenceKeyCount","int GetFriendRichPresenceKeyCount( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","GetFriendRichPresenceKeyByIndex","const char *GetFriendRichPresenceKeyByIndex( CSteamID steamIDFriend, int iKey )","pointer",3,false},
++  {"SteamFriends013","RequestFriendRichPresence","void RequestFriendRichPresence( CSteamID steamIDFriend )","void",2,false},
++  {"SteamFriends013","InviteUserToGame","bool InviteUserToGame( CSteamID steamIDFriend, const char *pchConnectString )","bool",3,false},
++  {"SteamFriends013","GetCoplayFriendCount","int GetCoplayFriendCount()","scalar",0,false},
++  {"SteamFriends013","GetCoplayFriend","CSteamID GetCoplayFriend( int iCoplayFriend )","struct-return",2,false},
++  {"SteamFriends013","GetFriendCoplayTime","int GetFriendCoplayTime( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","GetFriendCoplayGame","AppId_t GetFriendCoplayGame( CSteamID steamIDFriend )","scalar",2,false},
++  {"SteamFriends013","JoinClanChatRoom","SteamAPICall_t JoinClanChatRoom( CSteamID steamIDClan )","uint64",2,false},
++  {"SteamFriends013","LeaveClanChatRoom","bool LeaveClanChatRoom( CSteamID steamIDClan )","bool",2,false},
++  {"SteamFriends013","GetClanChatMemberCount","int GetClanChatMemberCount( CSteamID steamIDClan )","scalar",2,false},
++  {"SteamFriends013","GetChatMemberByIndex","CSteamID GetChatMemberByIndex( CSteamID steamIDClan, int iUser )","struct-return",4,false},
++  {"SteamFriends013","SendClanChatMessage","bool SendClanChatMessage( CSteamID steamIDClanChat, const char *pchText )","bool",3,false},
++  {"SteamFriends013","GetClanChatMessage","int GetClanChatMessage( CSteamID steamIDClanChat, int iMessage, void *prgchText, int cchTextMax, EChatEntryType *, CSteamID * )","scalar",7,false},
++  {"SteamFriends013","IsClanChatAdmin","bool IsClanChatAdmin( CSteamID steamIDClanChat, CSteamID steamIDUser )","bool",4,false},
++  {"SteamFriends013","IsClanChatWindowOpenInSteam","bool IsClanChatWindowOpenInSteam( CSteamID steamIDClanChat )","bool",2,false},
++  {"SteamFriends013","OpenClanChatWindowInSteam","bool OpenClanChatWindowInSteam( CSteamID steamIDClanChat )","bool",2,false},
++  {"SteamFriends013","CloseClanChatWindowInSteam","bool CloseClanChatWindowInSteam( CSteamID steamIDClanChat )","bool",2,false},
++  {"SteamFriends013","SetListenForFriendsMessages","bool SetListenForFriendsMessages( bool bInterceptEnabled )","bool",1,false},
++  {"SteamFriends013","ReplyToFriendMessage","bool ReplyToFriendMessage( CSteamID steamIDFriend, const char *pchMsgToSend )","bool",3,false},
++  {"SteamFriends013","GetFriendMessage","int GetFriendMessage( CSteamID steamIDFriend, int iMessageID, void *pvData, int cubData, EChatEntryType *peChatEntryType )","scalar",6,false},
++  {"SteamFriends013","GetFollowerCount","SteamAPICall_t GetFollowerCount( CSteamID steamID )","uint64",2,false},
++  {"SteamFriends013","IsFollowing","SteamAPICall_t IsFollowing( CSteamID steamID )","uint64",2,false},
++  {"SteamFriends013","EnumerateFollowingList","SteamAPICall_t EnumerateFollowingList( uint32 unStartIndex )","uint64",1,false},
++};
++static constexpr Entry kNetworking[] = {
++  {"SteamNetworking005","SendP2PPacket","bool SendP2PPacket( CSteamID steamIDRemote, const void *pubData, uint32 cubData, EP2PSend eP2PSendType, int nChannel = 0 )","bool",6,false},
++  {"SteamNetworking005","IsP2PPacketAvailable","bool IsP2PPacketAvailable( uint32 *pcubMsgSize, int nChannel = 0 )","bool",2,false},
++  {"SteamNetworking005","ReadP2PPacket","bool ReadP2PPacket( void *pubDest, uint32 cubDest, uint32 *pcubMsgSize, CSteamID *psteamIDRemote, int nChannel = 0 )","bool",5,false},
++  {"SteamNetworking005","AcceptP2PSessionWithUser","bool AcceptP2PSessionWithUser( CSteamID steamIDRemote )","bool",2,false},
++  {"SteamNetworking005","CloseP2PSessionWithUser","bool CloseP2PSessionWithUser( CSteamID steamIDRemote )","bool",2,false},
++  {"SteamNetworking005","CloseP2PChannelWithUser","bool CloseP2PChannelWithUser( CSteamID steamIDRemote, int nChannel )","bool",3,false},
++  {"SteamNetworking005","GetP2PSessionState","bool GetP2PSessionState( CSteamID steamIDRemote, P2PSessionState_t *pConnectionState )","bool",3,false},
++  {"SteamNetworking005","AllowP2PPacketRelay","bool AllowP2PPacketRelay( bool bAllow )","bool",1,false},
++  {"SteamNetworking005","CreateListenSocket","SNetListenSocket_t CreateListenSocket( int nVirtualP2PPort, uint32 nIP, uint16 nPort, bool bAllowUseOfPacketRelay )","scalar",4,false},
++  {"SteamNetworking005","CreateP2PConnectionSocket","SNetSocket_t CreateP2PConnectionSocket( CSteamID steamIDTarget, int nVirtualPort, int nTimeoutSec, bool bAllowUseOfPacketRelay )","scalar",5,false},
++  {"SteamNetworking005","CreateConnectionSocket","SNetSocket_t CreateConnectionSocket( uint32 nIP, uint16 nPort, int nTimeoutSec )","scalar",3,false},
++  {"SteamNetworking005","DestroySocket","bool DestroySocket( SNetSocket_t hSocket, bool bNotifyRemoteEnd )","bool",2,false},
++  {"SteamNetworking005","DestroyListenSocket","bool DestroyListenSocket( SNetListenSocket_t hSocket, bool bNotifyRemoteEnd )","bool",2,false},
++  {"SteamNetworking005","SendDataOnSocket","bool SendDataOnSocket( SNetSocket_t hSocket, void *pubData, uint32 cubData, bool bReliable )","bool",4,false},
++  {"SteamNetworking005","IsDataAvailableOnSocket","bool IsDataAvailableOnSocket( SNetSocket_t hSocket, uint32 *pcubMsgSize )","bool",2,false},
++  {"SteamNetworking005","RetrieveDataFromSocket","bool RetrieveDataFromSocket( SNetSocket_t hSocket, void *pubDest, uint32 cubDest, uint32 *pcubMsgSize )","bool",4,false},
++  {"SteamNetworking005","IsDataAvailable","bool IsDataAvailable( SNetListenSocket_t hListenSocket, uint32 *pcubMsgSize, SNetSocket_t *phSocket )","bool",3,false},
++  {"SteamNetworking005","RetrieveData","bool RetrieveData( SNetListenSocket_t hListenSocket, void *pubDest, uint32 cubDest, uint32 *pcubMsgSize, SNetSocket_t *phSocket )","bool",5,false},
++  {"SteamNetworking005","GetSocketInfo","bool GetSocketInfo( SNetSocket_t hSocket, CSteamID *pSteamIDRemote, int *peSocketStatus, uint32 *punIPRemote, uint16 *punPortRemote )","bool",5,false},
++  {"SteamNetworking005","GetListenSocketInfo","bool GetListenSocketInfo( SNetListenSocket_t hListenSocket, uint32 *pnIP, uint16 *pnPort )","bool",3,false},
++  {"SteamNetworking005","GetSocketConnectionType","ESNetSocketConnectionType GetSocketConnectionType( SNetSocket_t hSocket )","scalar",1,false},
++  {"SteamNetworking005","GetMaxPacketSize","int GetMaxPacketSize( SNetSocket_t hSocket )","scalar",1,false},
++};
++static constexpr Entry kGameServer[] = {
++  {"SteamGameServer011","InitGameServer","bool InitGameServer( uint32 unIP, uint16 usGamePort, uint16 usQueryPort, uint32 unFlags, AppId_t nGameAppId, const char *pchVersionString )","bool",6,true},
++  {"SteamGameServer011","SetProduct","void SetProduct( const char *pszProduct )","void",1,false},
++  {"SteamGameServer011","SetGameDescription","void SetGameDescription( const char *pszGameDescription )","void",1,false},
++  {"SteamGameServer011","SetModDir","void SetModDir( const char *pszModDir )","void",1,false},
++  {"SteamGameServer011","SetDedicatedServer","void SetDedicatedServer( bool bDedicated )","void",1,false},
++  {"SteamGameServer011","LogOn","void LogOn( const char *pszAccountName, const char *pszPassword )","void",2,false},
++  {"SteamGameServer011","LogOnAnonymous","void LogOnAnonymous()","void",0,false},
++  {"SteamGameServer011","LogOff","void LogOff()","void",0,false},
++  {"SteamGameServer011","BLoggedOn","bool BLoggedOn()","bool",0,false},
++  {"SteamGameServer011","BSecure","bool BSecure()","bool",0,false},
++  {"SteamGameServer011","GetSteamID","CSteamID GetSteamID()","struct-return",1,true},
++  {"SteamGameServer011","WasRestartRequested","bool WasRestartRequested()","bool",0,false},
++  {"SteamGameServer011","SetMaxPlayerCount","void SetMaxPlayerCount( int cPlayersMax )","void",1,false},
++  {"SteamGameServer011","SetBotPlayerCount","void SetBotPlayerCount( int cBotplayers )","void",1,false},
++  {"SteamGameServer011","SetServerName","void SetServerName( const char *pszServerName )","void",1,false},
++  {"SteamGameServer011","SetMapName","void SetMapName( const char *pszMapName )","void",1,false},
++  {"SteamGameServer011","SetPasswordProtected","void SetPasswordProtected( bool bPasswordProtected )","void",1,false},
++  {"SteamGameServer011","SetSpectatorPort","void SetSpectatorPort( uint16 unSpectatorPort )","void",1,false},
++  {"SteamGameServer011","SetSpectatorServerName","void SetSpectatorServerName( const char *pszSpectatorServerName )","void",1,false},
++  {"SteamGameServer011","ClearAllKeyValues","void ClearAllKeyValues()","void",0,false},
++  {"SteamGameServer011","SetKeyValue","void SetKeyValue( const char *pKey, const char *pValue )","void",2,false},
++  {"SteamGameServer011","SetGameTags","void SetGameTags( const char *pchGameTags )","void",1,false},
++  {"SteamGameServer011","SetGameData","void SetGameData( const char *pchGameData)","void",1,false},
++  {"SteamGameServer011","SetRegion","void SetRegion( const char *pszRegion )","void",1,false},
++  {"SteamGameServer011","SendUserConnectAndAuthenticate","bool SendUserConnectAndAuthenticate( uint32 unIPClient, const void *pvAuthBlob, uint32 cubAuthBlobSize, CSteamID *pSteamIDUser )","bool",4,false},
++  {"SteamGameServer011","CreateUnauthenticatedUserConnection","CSteamID CreateUnauthenticatedUserConnection()","struct-return",1,false},
++  {"SteamGameServer011","SendUserDisconnect","void SendUserDisconnect( CSteamID steamIDUser )","void",2,false},
++  {"SteamGameServer011","BUpdateUserData","bool BUpdateUserData( CSteamID steamIDUser, const char *pchPlayerName, uint32 uScore )","bool",4,false},
++  {"SteamGameServer011","GetAuthSessionTicket","HAuthTicket GetAuthSessionTicket( void *pTicket, int cbMaxTicket, uint32 *pcbTicket )","scalar",3,false},
++  {"SteamGameServer011","BeginAuthSession","EBeginAuthSessionResult BeginAuthSession( const void *pAuthTicket, int cbAuthTicket, CSteamID steamID )","scalar",4,false},
++  {"SteamGameServer011","EndAuthSession","void EndAuthSession( CSteamID steamID )","void",2,false},
++  {"SteamGameServer011","CancelAuthTicket","void CancelAuthTicket( HAuthTicket hAuthTicket )","void",1,false},
++  {"SteamGameServer011","UserHasLicenseForApp","EUserHasLicenseForAppResult UserHasLicenseForApp( CSteamID steamID, AppId_t appID )","scalar",3,false},
++  {"SteamGameServer011","RequestUserGroupStatus","bool RequestUserGroupStatus( CSteamID steamIDUser, CSteamID steamIDGroup )","bool",4,false},
++  {"SteamGameServer011","GetGameplayStats","void GetGameplayStats( )","void",0,false},
++  {"SteamGameServer011","GetServerReputation","SteamAPICall_t GetServerReputation( )","uint64",0,false},
++  {"SteamGameServer011","GetPublicIP","uint32 GetPublicIP()","scalar",0,false},
++  {"SteamGameServer011","HandleIncomingPacket","bool HandleIncomingPacket( const void *pData, int cbData, uint32 srcIP, uint16 srcPort )","bool",4,false},
++  {"SteamGameServer011","GetNextOutgoingPacket","int GetNextOutgoingPacket( void *pOut, int cbMaxOut, uint32 *pNetAdr, uint16 *pPort )","scalar",4,false},
++  {"SteamGameServer011","EnableHeartbeats","void EnableHeartbeats( bool bActive )","void",1,false},
++  {"SteamGameServer011","SetHeartbeatInterval","void SetHeartbeatInterval( int iHeartbeatInterval )","void",1,false},
++  {"SteamGameServer011","ForceHeartbeat","void ForceHeartbeat()","void",0,false},
++  {"SteamGameServer011","AssociateWithClan","SteamAPICall_t AssociateWithClan( CSteamID steamIDClan )","uint64",2,false},
++  {"SteamGameServer011","ComputeNewPlayerCompatibility","SteamAPICall_t ComputeNewPlayerCompatibility( CSteamID steamIDNewPlayer )","uint64",2,false},
++};
++inline const Entry *lookup(unsigned iface, unsigned slot) { switch (iface) {
++case 1: return slot < 22 ? &kUser[slot] : nullptr;
++case 2: return slot < 23 ? &kUtils[slot] : nullptr;
++case 3: return slot < 43 ? &kUserStats[slot] : nullptr;
++case 4: return slot < 19 ? &kApps[slot] : nullptr;
++case 5: return slot < 63 ? &kFriends[slot] : nullptr;
++case 6: return slot < 22 ? &kNetworking[slot] : nullptr;
++case 7: return slot < 44 ? &kGameServer[slot] : nullptr;
++default: return nullptr; } }
++} // namespace steam_abi
+diff -ruN a/runtime/win32/user32_impl.cpp b/runtime/win32/user32_impl.cpp
+--- a/runtime/win32/user32_impl.cpp	2026-11-11 09:30:02
++++ b/runtime/win32/user32_impl.cpp	2026-11-06 12:08:14
+@@ -22,7 +22,9 @@
+ #include <cstdlib>
+ #include <cmath>
+ #include <ctime>
+-#include <ApplicationServices/ApplicationServices.h>
++#include <CoreGraphics/CoreGraphics.h>
++extern "C" void ios_cursor_read(double*, double*);
++extern "C" void ios_cursor_set(double, double);
+ 
+ // Real window-server focus, published by metal_backend.mm unmasked by
+ // BO2_FORCE_FOCUS. The cursor recentring must obey this, never the forced lie.
+@@ -114,7 +116,7 @@
+         case 32: // SM_NETWORK
+             result = 3; break; // network present
+         case 38: // SM_CMONITORS (Windows 98+)
+-            { CGDisplayCount count = 0; CGGetActiveDisplayList(0, nullptr, &count); result = count ? count : 1; }
++            result = 1;
+             break;
+         case 40: // SM_CXMAXTRACK
+             result = 0x7FFFFFFF; break;
+@@ -516,10 +518,7 @@
+ static int    g_sans_reponse = 0;
+ 
+ static void cursor_real(double& x, double& y) {
+-    CGEventRef e = CGEventCreate(nullptr);
+-    CGPoint loc = CGEventGetLocation(e);
+-    CFRelease(e);
+-    x = loc.x; y = loc.y;
++    ios_cursor_read(&x, &y);
+ }
+ 
+ // Témoin du pointeur tenu (le testeur, 2026-10-10 : « invisible, mais il bloque toujours aux bords de l'écran »). Il ne
+@@ -659,10 +658,9 @@
+     g_visee = true; g_lu_bouge = false; g_sans_reponse = 0;
+     g_ct.tenus++;
+     if (drift > kDrift) {
+-        if (CGWarpMouseCursorPosition(CGPointMake(cx, cy)) != kCGErrorSuccess) g_ct.err++;
++        ios_cursor_set(cx, cy);
+         g_ct.warps++;
+         g_ct.t_warp = g_ct.t_set;
+-        CGAssociateMouseAndMouseCursorPosition(true);   // or the window server holds the mouse still for 0.25 s
+         g_real_ref_x = cx; g_real_ref_y = cy;
+         static uint64_t nw = 0;
+         if (++nw <= 3)
+diff -ruN a/runtime/win32/win32_runtime.cpp b/runtime/win32/win32_runtime.cpp
+--- a/runtime/win32/win32_runtime.cpp	2026-11-11 09:30:02
++++ b/runtime/win32/win32_runtime.cpp	2026-11-06 12:12:52
+@@ -15403,7 +15403,7 @@
+ // dans 4 Go). Un mot atomique ne se dechire pas entre fils ; l'entree porte sa propre cle, donc un
+ // ecrasement concurrent rend au pire un defaut. La table est remplie au demarrage ;
+ // register_jump_target invalide quand meme la case de la va qu'il ecrit.
+-extern "C" const struct mach_header_64 _mh_execute_header;
++extern "C" const struct mach_header_64 _mh_dylib_header;
+ namespace {
+ constexpr uint32_t kLkCases = 8192;
+ std::atomic<uint64_t> g_lk_cache[kLkCases];
+@@ -15902,7 +15902,7 @@
+ // running anything, so it can look for the next resumable frame up the stack.
+ // C32 : la meme reponse que lookup_lifted, par le cache. nullptr si la va n'est pas liftee.
+ static BlockFn lifted_fn(uint32_t va) {
+-    const char* const base = reinterpret_cast<const char*>(&_mh_execute_header);
++    const char* const base = reinterpret_cast<const char*>(&_mh_dylib_header);
+     std::atomic<uint64_t>& e = g_lk_cache[lk_case(va)];
+     const uint64_t w = e.load(std::memory_order_relaxed);
+     if ((uint32_t)(w >> 32) == va && (uint32_t)w != 0u)
+diff -ruN a/runtime/win32/x86_guest_vm.cpp b/runtime/win32/x86_guest_vm.cpp
+--- a/runtime/win32/x86_guest_vm.cpp	2026-11-11 09:30:02
++++ b/runtime/win32/x86_guest_vm.cpp	2026-11-06 16:08:55
+@@ -84,6 +84,7 @@
+ 
+     explicit Impl(X86GuestVM& o) : owner(o) {
+         check(uc_open(UC_ARCH_X86,UC_MODE_32,&uc));
++        check(uc_ctl_set_tcg_buffer_size(uc, 8u << 20));
+         try {
+             uc_hook h;
+             check(uc_hook_add(uc,&h,UC_HOOK_BLOCK,reinterpret_cast<void*>(blockHook),this,1,0));

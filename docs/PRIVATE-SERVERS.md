@@ -38,7 +38,7 @@ Use this setup when the Windows game host is on a different network and the iPho
 
 ### USB fallback for a Mac-connected iPhone
 
-When packaging the app, pass `--private-server "$GATEWAY_IP"` along with `--lan-root`. Choose the private LAN IPv4 address that the Mac can use to reach the game server. In the separate Mac relay setup above, use the Mac gateway's Wi-Fi address and keep both relay processes running.
+When packaging the app, pass `--private-server "$GATEWAY_IP"` (with `ios/setup.sh`, set `SERVER_IP="$GATEWAY_IP"`). Choose the private LAN IPv4 address that the Mac can use to reach the game server. In the separate Mac relay setup above, use the Mac gateway's Wi-Fi address and keep both relay processes running.
 
 Plug one trusted iPhone into the Mac, then start the USB helper on the Mac with the same address.
 

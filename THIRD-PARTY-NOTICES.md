@@ -8,6 +8,8 @@ work below. Each entry says where the work is used and under which terms.
 | Work | Where | Licence |
 |---|---|---|
 | [iDeck](https://github.com/kuscholar/iDeck) (Madeira `SwiftSteam`), revision `2ac39beff91251d36f3ad6331d3f8402b3c10e18` | [ios/SteamAuth/](ios/SteamAuth/), and the session, library and metadata files under [ios/SteamServices/Core/](ios/SteamServices/Core/) and [ios/SteamServices/Library/](ios/SteamServices/Library/) | GPL-3.0-or-later with the Madeira Converter Exception. Text in [ios/SteamAuth/COPYING](ios/SteamAuth/COPYING) and [ios/SteamAuth/LICENSE-EXCEPTION.md](ios/SteamAuth/LICENSE-EXCEPTION.md); provenance and the list of changes in [ios/SteamAuth/UPSTREAM.md](ios/SteamAuth/UPSTREAM.md). Per-file copyright notices are kept. |
+| [bo2-mac](https://github.com/adrbn/bo2-mac), v0.2.0-test.4 (`218dc8040956c0ec033eed02fe39866b7967892a`) | [ios/runtime.patch](ios/runtime.patch) is a set of changes to its runtime; [ios/convert_modes.py](ios/convert_modes.py), [ios/link_mode.py](ios/link_mode.py) and [ios/fold_modes.sh](ios/fold_modes.sh) drive its converter | GPL-3.0 |
+| Steam interface declarations from [source-sdk-2013](https://github.com/ValveSoftware/source-sdk-2013) at `39ed875`, `mp/src/public/steam` | The method table `steam_abi_generated.h` inside [ios/runtime.patch](ios/runtime.patch): interface versions, method names and declarations only | Source 1 SDK License |
 
 The Steam message layouts were written against public schema references, which are documentation and not copied
 code: [SteamDatabase/Protobufs](https://github.com/SteamDatabase/Protobufs) and

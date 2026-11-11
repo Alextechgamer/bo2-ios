@@ -137,27 +137,31 @@ the phone. A hardware controller works at the same time.
 
 ## Install
 
-The full walk-through is in [docs/INSTALL.md](docs/INSTALL.md). In short, on a Mac with Xcode, XcodeGen and
-Python 3.11 or later:
+The full walk-through is in [docs/INSTALL.md](docs/INSTALL.md). In short, on an Apple silicon Mac with Xcode,
+XcodeGen, CMake, [bo2-mac](https://github.com/adrbn/bo2-mac)'s app and your three unpacked executables:
 
 ```sh
 python3 ios/steam_receipt.py "$PRIVATE/SteamOwnership.plist"
 ```
 
 ```sh
-python3 ios/package_game.py "$BUILD" "$GAME_ZIP" "$OUTPUT_IPA" "$WORK" --team "$DEVELOPMENT_TEAM" --bundle-id "$BUNDLE_ID" --receipt "$PRIVATE/SteamOwnership.plist"
+RECEIPT="$PRIVATE/SteamOwnership.plist" BUNDLE_ID=com.example.bo2 ios/setup.sh "$WORK"
 ```
 
-`$BUILD` holds the translated frameworks and guest sections, which this repository does not contain. `$GAME_ZIP`
-is a ZIP of your own installation. Install the IPA from Xcode's Devices window, then sign in to Steam in the app.
+The setup translates your copy, builds the three frameworks and writes `$WORK/out/BlackOpsII.ipa`. It is a long build
+and resumes where it stopped. With `TEAM` set it signs with your Xcode team; without it the IPA is unsigned, for
+SideStore or a signing service. There is no ready-made IPA: the app contains the game's code, so each player builds
+their own. The setup links online play into Multiplayer and Zombies and the private-server transport into Zombies;
+Multiplayer on private servers also needs your own capture of the server's interface scripts.
 
 Hosting and joining private servers, the Mac relay, the USB fallback and the match verifiers are in
 [docs/PRIVATE-SERVERS.md](docs/PRIVATE-SERVERS.md).
 
 ## Limits
 
-- **You need the translated frameworks.** They come from bo2-mac's converter run for iOS on your own executables.
-  That step is not packaged here yet.
+- **You build the translated frameworks yourself.** [ios/setup.sh](ios/setup.sh) runs bo2-mac's converter for iOS
+  on your own executables. Multiplayer's private-server link needs nine interface scripts captured from your own
+  r5369 server; the capture tool is not in this repository yet.
 - **Downloading the game from Steam inside the app is not implemented.** Game files come from the package or from
   the private library installer. The Steam library screen lists what you own and what is playable.
 - **Steam Cloud saves are not synchronised.**
@@ -184,8 +188,13 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 | [ios/SteamAuth/](ios/SteamAuth/) | Steam sign-in (password, QR, Steam Guard, Keychain), adapted from iDeck |
 | [ios/SteamServices/](ios/SteamServices/) | Shared Steam session, library, tickets, game-server session, save folders |
 | [ios/SteamRuntimeProvider.mm](ios/SteamRuntimeProvider.mm) | The provider table the game's Steam interface reads |
-| [ios/fold_modes.sh](ios/fold_modes.sh) | Recompiles a mode's translated code with the memory and flag helpers folded in, at `-O2` |
-| [ios/package_game.py](ios/package_game.py) | Builds and signs a personal IPA |
+| [ios/setup.sh](ios/setup.sh) | The build from a Steam copy to an IPA, in resumable stages |
+| [ios/runtime.patch](ios/runtime.patch) | The iOS changes to bo2-mac's runtime, against v0.2.0-test.4 |
+| [ios/convert_modes.py](ios/convert_modes.py), [ios/link_mode.py](ios/link_mode.py) | Translate the three executables; link one framework per mode, with the network transports |
+| [ios/dw_online.cpp](ios/dw_online.cpp), [ios/dw_online.h](ios/dw_online.h), [ios/dw_guest_socket.h](ios/dw_guest_socket.h) | The game's Winsock calls on real sockets, allowed only for a signed-in account that owns the game |
+| [ios/plutonium_sections.py](ios/plutonium_sections.py) | The memory image a mode starts from when it joins a LAN-mode server |
+| [ios/fold_modes.sh](ios/fold_modes.sh) | Compiles a mode's translated code with the memory and flag helpers folded in, at `-O2` |
+| [ios/package_game.py](ios/package_game.py) | Builds a personal IPA, signed with your team or unsigned |
 | [lan/](lan/) | Private-server hosting, Mac relay, USB fallback, match verifiers |
 | [docs/](docs/) | [Install and play](docs/INSTALL.md), [private servers](docs/PRIVATE-SERVERS.md) |
 | [LICENSE](LICENSE), [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) | GPL-3.0-or-later, and what this builds on |
@@ -200,7 +209,7 @@ libraries, compiled frameworks, archives and device reports outside the reposito
 3. Keep online play alive across a brief Steam reconnect.
 4. Enforce the runtime compatibility check on every way into a Steam session.
 5. Private-server joins over Wi-Fi and by host name.
-6. A documented, repeatable build from a Steam copy to a signed IPA.
+6. A full run of `ios/setup.sh` on a second Mac, and a match played with what it builds.
 
 ## Legal
 

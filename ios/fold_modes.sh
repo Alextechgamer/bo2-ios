@@ -46,6 +46,6 @@ N=$(ls "$W"/batch_*.bc | wc -l | tr -d ' ')
 echo "[$(date +%H:%M:%S)] $MODE: $N slices, $PAR parallel"
 for n in $(seq 0 $((N - 1))); do echo "$(stat -f %z "$W/batch_$n.bc") $n"; done | sort -rn | cut -d' ' -f2 \
   | xargs -P "$PAR" -I{} bash -c 'slice {}'
-DONE=$(ls "$OUT" | grep -c '\.ios\.o$'); BAD=$(ls "$OUT" | grep -c '\.FAILED$')
+DONE=$(ls "$OUT" | grep -c '^batch_[0-9]*\.ios\.o$'); BAD=$(ls "$OUT" | grep -c '\.FAILED$')
 echo "[$(date +%H:%M:%S)] $MODE: objects $DONE of $N, failures $BAD"
 [ "$DONE" = "$N" ] && [ "$BAD" = 0 ]

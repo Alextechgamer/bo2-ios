@@ -32,9 +32,17 @@
 !/ios/TouchOverlay.m
 !/ios/assemble_full.py
 !/ios/build_shader_library.py
+!/ios/convert_modes.py
+!/ios/dw_guest_socket.h
+!/ios/dw_online.cpp
+!/ios/dw_online.h
 !/ios/fold_modes.sh
 !/ios/index_library.py
+!/ios/link_mode.py
 !/ios/package_game.py
+!/ios/plutonium_sections.py
+!/ios/runtime.patch
+!/ios/setup.sh
 !/ios/runtime_catalog.py
 !/ios/steam_install_server.py
 !/ios/steam_receipt.py
