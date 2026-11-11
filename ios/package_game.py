@@ -51,12 +51,13 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
                   INFOPLIST_KEY_UILaunchScreen_Generation="YES",INFOPLIST_KEY_UIRequiresFullScreen="YES",
                   INFOPLIST_KEY_UISupportedInterfaceOrientations="UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight",
                   CURRENT_PROJECT_VERSION="1",MARKETING_VERSION="0.1",IPHONEOS_DEPLOYMENT_TARGET="16.0",
-                  SWIFT_VERSION="5.0",SWIFT_OBJC_BRIDGING_HEADER="SteamRuntimeProvider.h")
+                  SWIFT_VERSION="5.0",SWIFT_OBJC_BRIDGING_HEADER="SwiftBridge.h")
     settings.update(dict(CODE_SIGNING_ALLOWED="NO") if unsigned else
                     dict(DEVELOPMENT_TEAM=team,CODE_SIGN_STYLE="Automatic"))
     project=dict(name="BlackOpsII",targets={"BlackOpsII":dict(type="application",platform="iOS",
                  sources=["FullGame.m","TouchOverlay.m","SteamServices",dict(path="SteamAuth",excludes=["COPYING","LICENSE-EXCEPTION.md","docs","UPSTREAM.md"])],
-                 dependencies=[{"sdk":"AuthenticationServices.framework"},{"sdk":"AVFAudio.framework"}],settings={"base":settings})})
+                 dependencies=[{"sdk":"AuthenticationServices.framework"},{"sdk":"AVFAudio.framework"},
+                               {"sdk":"liblzma.tbd"},{"sdk":"libz.tbd"}],settings={"base":settings})})
     out.parent.mkdir(parents=True,exist_ok=True)
     work.mkdir(parents=True,exist_ok=True)
     with (nullcontext() if shell_only else ZipFile(game_zip)) as game, tempfile.TemporaryDirectory(dir=work) as folder:
@@ -77,6 +78,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         for name in ("TouchOverlay.h","TouchOverlay.m"): shutil.copyfile(src/name,stage/name)
         shutil.copyfile(src/"SteamSignInBridge.h",stage/"SteamSignInBridge.h")
         shutil.copyfile(src/"SteamRuntimeProvider.h",stage/"SteamRuntimeProvider.h")
+        shutil.copyfile(src/"SwiftBridge.h",stage/"SwiftBridge.h")
         shutil.copytree(src/"SteamAuth",stage/"SteamAuth")
         shutil.copytree(src/"SteamServices",stage/"SteamServices")
         spec=stage/"project.json"

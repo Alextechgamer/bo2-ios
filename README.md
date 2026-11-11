@@ -91,7 +91,7 @@ Starts locally from the launcher. Touch controls switch by hand with the Menu / 
 <b>Play Online with Steam</b> for public matches with your own account, <b>Play Local</b>, or
 <b>Join Private Server</b>.</td>
 <td width="33%" valign="top"><b>Zombies</b><br>
-Starts locally, or joins a LAN-mode private server.</td>
+<b>Play Online with Steam</b>, <b>Play Local</b>, or joins a LAN-mode private server.</td>
 </tr>
 </table>
 
@@ -106,7 +106,8 @@ Starts locally, or joins a LAN-mode private server.</td>
    and the code that loads a framework and starts the guest on its own thread.
 4. **Steam.** [SteamAuth/](ios/SteamAuth/) is the sign-in module adapted from
    [iDeck](https://github.com/kuscholar/iDeck). [SteamServices/](ios/SteamServices/) keeps one authenticated
-   session for the owned library, encrypted app tickets, the game-server session and per-account save folders.
+   session for the owned library, encrypted app tickets, the game-server session, per-account save folders and
+   the download of your own game files from Steam's content servers.
    [SteamRuntimeProvider.mm](ios/SteamRuntimeProvider.mm) is the C table the game's Steam calls are answered from.
 5. **Touch.** [TouchOverlay.m](ios/TouchOverlay.m) lives in the launcher and reaches the loaded framework through
    its exported input functions, so the controls change without relinking a framework.
@@ -173,7 +174,8 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 - **Private servers over Wi-Fi timed out on the tested phone.** The USB path through a Mac works.
 - **Local play is being worked on.** Campaign, local Multiplayer and solo Zombies start, but have had far less
   attention than online play. Coming soon.
-- **Not yet tried:** Campaign and Zombies with the new touch controls, official Zombies, progress after a finished
+- **Not yet tried:** Campaign and Zombies with the new touch controls, Zombies online with Steam (the launcher
+  offers it; no session has been played), progress after a finished
   public match, any iPhone other than the one named above.
 - **Free Apple IDs** sign an app for 7 days.
 
@@ -204,7 +206,8 @@ libraries, compiled frameworks, archives and device reports outside the reposito
 
 ## Roadmap
 
-1. Download owned game files from Steam inside the app, with resumable, verified installs.
+1. A full download of the game from Steam inside the app, on a phone. The download is in the launcher
+   (**Game Files**); see [docs/INSTALL.md](docs/INSTALL.md) for how far it has been checked.
 2. One save location per account, and Steam Cloud where the game uses it.
 3. Keep online play alive across a brief Steam reconnect.
 4. Enforce the runtime compatibility check on every way into a Steam session.

@@ -115,7 +115,7 @@ static NSURL *GameDirectory(NSError **error) {
         assets = [support URLByAppendingPathComponent:@"BO2GameFiles"];
         if (![assets checkResourceIsReachableAndReturnError:nil]) {
             if (error) *error = [NSError errorWithDomain:@"BO2" code:1 userInfo:@{
-                NSLocalizedDescriptionKey:@"Sign in with Steam to install your game files."
+                NSLocalizedDescriptionKey:@"Sign in to Steam, then tap Game Files to download your game."
             }];
             return nil;
         }
@@ -273,7 +273,7 @@ static void EndRunLog(void) {
     modes.spacing = 12;
     NSDictionary *detail = @{@"sps":@[@"Story missions", @"flag.fill"],
                              @"mps":@[@"Online with Steam or local", @"person.3.fill"],
-                             @"zms":@[@"Survive the waves", @"bolt.heart.fill"]};
+                             @"zms":@[@"Online with Steam or solo", @"bolt.heart.fill"]};
     for (NSString *mode in @[@"sps",@"mps",@"zms"]) {
         UIButton *card = Card(Modes()[mode], detail[mode][0], detail[mode][1]);
         card.accessibilityIdentifier = mode;
@@ -436,13 +436,14 @@ static void EndRunLog(void) {
 - (void)choose:(UIButton *)sender {
     if (_checking) return;
     _server=nil;
-    if ([sender.accessibilityIdentifier isEqualToString:@"mps"]) {
-        UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Multiplayer" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    NSString *mode = sender.accessibilityIdentifier;
+    if ([mode isEqualToString:@"mps"] || [mode isEqualToString:@"zms"]) {
+        UIAlertController *menu=[UIAlertController alertControllerWithTitle:Modes()[mode] message:nil preferredStyle:UIAlertControllerStyleAlert];
         [menu addAction:[UIAlertAction actionWithTitle:@"Play Online with Steam" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [self startSteam:@"mps" online:YES];
+            [self startSteam:mode online:YES];
         }]];
         [menu addAction:[UIAlertAction actionWithTitle:@"Play Local" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [self start:@"mps"];
+            [self start:mode];
         }]];
         [menu addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:menu animated:YES completion:nil];
@@ -452,6 +453,30 @@ static void EndRunLog(void) {
 }
 - (void)steamInstall {
     if(_installer || _started || _checking) return;
+    // A second tap pauses a running download; finished parts are kept.
+    if(BO2GameDownload.running){ [BO2GameDownload cancel]; return; }
+    if([NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Game"].hasDirectoryPath &&
+       [[NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:@"Game"] checkResourceIsReachableAndReturnError:nil]){
+        _status.text=@"This app already contains its game files."; return;
+    }
+    NSString *origin=[NSBundle.mainBundle objectForInfoDictionaryKey:@"GameLibraryOrigin"];
+    if(![origin isKindOfClass:NSString.class] || !origin.length){ [self steamDownload]; return; }
+    UIAlertController *menu=[UIAlertController alertControllerWithTitle:@"Game Files" message:nil preferredStyle:UIAlertControllerStyleAlert];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Download from Steam" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){ [self steamDownload]; }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Private Library" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){ [self libraryInstall]; }]];
+    [menu addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
+    [self presentViewController:menu animated:YES completion:nil];
+}
+- (void)steamDownload {
+    if(_installer || _started || _checking || BO2GameDownload.running) return;
+    __weak ModePicker *weakSelf=self;
+    [BO2GameDownload startWithStatus:^(NSString *text,BOOL done){
+        ModePicker *picker=weakSelf;
+        if(picker) picker->_status.text=text;
+    }];
+}
+- (void)libraryInstall {
+    if(_installer || _started || _checking || BO2GameDownload.running) return;
     _installer=[SteamInstaller new];
     _installer.window=self.view.window;
     __weak ModePicker *weakSelf=self;
@@ -492,6 +517,7 @@ static void EndRunLog(void) {
 }
 - (void)startSteam:(NSString *)mode online:(BOOL)online {
     if (_installer || _started || _checking || !Modes()[mode]) return;
+    if (BO2GameDownload.running) { _status.text=@"Game files are still downloading. Tap Game Files to pause."; return; }
     NSError *error = nil;
     NSURL *assets = GameDirectory(&error);
     if (!assets) { _status.text = error.localizedDescription; return; }
@@ -516,6 +542,7 @@ static void EndRunLog(void) {
 }
 - (void)start:(NSString *)mode {
     if (_installer || _started || !Modes()[mode]) return;
+    if (BO2GameDownload.running) { _status.text=@"Game files are still downloading. Tap Game Files to pause."; return; }
     NSError *error = nil;
     NSURL *game = _steamLaunch ? [NSURL fileURLWithPath:_steamLaunch.gameDirectory isDirectory:YES] : GameDirectory(&error);
     if (!game) { _status.text = error.localizedDescription; return; }
@@ -539,7 +566,7 @@ static void EndRunLog(void) {
         return;
     }
     if (_steamLaunch) NSLog(@"[steam-runtime] provider installed before guest entry");
-    BOOL fixture=NO, official=_onlineRequested && [mode isEqualToString:@"mps"];
+    BOOL fixture=NO, official=_onlineRequested && ([mode isEqualToString:@"mps"] || [mode isEqualToString:@"zms"]);
 #if TARGET_OS_SIMULATOR
     fixture=[NSProcessInfo.processInfo.arguments containsObject:@"-BO2TransportFixturePort"];
     official |= [mode isEqualToString:@"mps"] && [NSProcessInfo.processInfo.arguments containsObject:@"-BO2ProbeOfficialMP"];

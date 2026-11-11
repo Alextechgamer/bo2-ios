@@ -8,6 +8,14 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSString *)accountName;
 @end
 
+// Downloads the signed-in account's own game files from Steam's content servers.
+@interface BO2GameDownload : NSObject
+@property(class, nonatomic, readonly, getter=isRunning) BOOL running;
+// The block runs on the main queue; done is YES for the last message of a run.
++ (void)startWithStatus:(void (^)(NSString *text, BOOL done))status;
++ (void)cancel;
+@end
+
 @interface BO2SteamLaunch : NSObject
 @property(nonatomic, readonly) NSString *gameDirectory;
 @property(nonatomic, readonly) NSString *personaName;

@@ -24,6 +24,9 @@
 !/ios/SteamServices/
 !/ios/SteamServices/**/
 !/ios/SteamServices/**/*.swift
+!/ios/SteamServices/Content/*.c
+!/ios/SteamServices/Content/*.h
+!/ios/SwiftBridge.h
 !/ios/SteamRuntimeProvider.h
 !/ios/SteamRuntimeProvider.mm
 !/ios/SteamRuntimeCalls.h

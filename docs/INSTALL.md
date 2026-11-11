@@ -7,7 +7,7 @@ This guide is for someone setting the port up on their own iPhone. It covers wha
 | Item | Notes |
 |---|---|
 | A Steam account that owns Black Ops II | Campaign is app 202970, Multiplayer 202990, Zombies 212910. |
-| Your own copy of the game files | Installed through Steam on a PC or Mac, then zipped with the game files at the archive root. |
+| Your own copy of the game files | Downloaded inside the app from Steam with your account (**Game Files**), or installed through Steam on a PC and zipped with the game files at the archive root. |
 | An Apple silicon Mac with Xcode, XcodeGen, CMake and Python 3.11 or later | The game's code is translated and the app is built on the Mac. Allow about 30 GB of free disk. |
 | [bo2-mac](https://github.com/adrbn/bo2-mac)'s `Black Ops II.app` | It carries the translation tools this build uses. |
 | Your three unpacked executables in `~/.bo2-native/steam/` | bo2-mac's README explains what they are. They are checked by SHA-256. Never share them. |
@@ -33,9 +33,9 @@ There is no ready-made IPA and there cannot be one: the app contains the game's 
    - **Signed with Xcode:** add `TEAM=<your team id>`. The IPA installs on devices registered to that team.
    - **Unsigned:** leave `TEAM` out, then sign `$WORK/out/BlackOpsII.ipa` with SideStore or a signing service.
    - **Game files inside the app:** add `GAME_ZIP=<zip of your game folder>`. The IPA is then about 16 GB, too large for most signing tools.
-   - **Online play:** the Steam network transport is linked into Multiplayer and Zombies by default; the launcher offers online play for Multiplayer. `ONLINE=0` leaves it out.
+   - **Online play:** the Steam network transport is linked into Multiplayer and Zombies by default, and the launcher offers online play for both. `ONLINE=0` leaves it out.
    - **Private servers:** linked into Zombies by default. Multiplayer also needs `PLUTO_LUA_ZIP=<zip>`, your own capture of the nine interface scripts an r5369 server sends; without it Multiplayer is built without the private-server transport and the setup says so. `PRIVATE_SERVER=0` leaves it out of both.
-   - **Game files installed afterwards:** without `GAME_ZIP` the app starts with no game files and says so. They then come from the private library installer in [PRIVATE-SERVERS.md](PRIVATE-SERVERS.md); pass its address as `LIBRARY_ORIGIN=<https origin>`. This route has not been tried with an app built by the setup.
+   - **Game files downloaded afterwards:** without `GAME_ZIP` the app starts with no game files and says so. Sign in to Steam in the app and tap **Game Files**; see [Download the game files](#download-the-game-files). The private library installer in [PRIVATE-SERVERS.md](PRIVATE-SERVERS.md) is still there: pass its address as `LIBRARY_ORIGIN=<https origin>` and **Game Files** offers both.
 
    To run one stage at a time, name it: `ios/setup.sh "$WORK" check`, then `source`, `deps`, `convert`, `fold`, `link`, `package`.
 
@@ -64,10 +64,11 @@ On one Apple silicon Mac mini with Xcode 26, November 11, 2026:
 - `link` ran three ways: Multiplayer with online only, Multiplayer with online and private servers, and Zombies with both. The Multiplayer and Zombies frameworks export the same entry points as the build that was played online and on private servers on the test phone, apart from that build's older touch-control classes, and their private-server memory images are identical to that build's.
 - `convert` and `fold` ran from nothing for Zombies only: about 10 minutes to translate and 9 minutes to compile. Campaign and Multiplayer reused a translation made earlier with the same tools.
 - The three frameworks were started in the iPhone simulator: Zombies and Multiplayer reached their main menus and Campaign played its opening video.
+- The launcher with the Steam download compiled for the phone and the simulator and was packaged. In the simulator, without a signed-in account, **Game Files** answered "Sign in to Steam first".
 
 - The tools were bo2-mac's app at `218dc80`, the same commit the setup pins the source to. The finished build folder was about 10 GB; the peak during the build was not measured.
 
-Not checked: an online session or a private-server join with frameworks linked by the setup, the Hksc download and build in `deps` (the link used a copy built earlier from the same commit), the signed (`TEAM`) and `GAME_ZIP` paths of the packager since they were changed, a full run for all three modes from nothing, a run on a second Mac, the unsigned IPA after SideStore or a signing service has signed it, and the result on a phone.
+Not checked: the Steam download itself (no manifest or file has been fetched with it yet; the download code is iDeck's, adapted to this app's folders), Zombies online with Steam, an online session or a private-server join with frameworks linked by the setup, the Hksc download and build in `deps` (the link used a copy built earlier from the same commit), the signed (`TEAM`) and `GAME_ZIP` paths of the packager since they were changed, a full run for all three modes from nothing, a run on a second Mac, the unsigned IPA after SideStore or a signing service has signed it, and the result on a phone.
 
 Installing over an existing copy keeps its game data and saves. Deleting the app removes them.
 
@@ -80,7 +81,16 @@ Installing over an existing copy keeps its game data and saves. Deleting the app
    - **Multiplayer** asks for **Play Online with Steam** or **Play Local**.
    - **Join Private Server** connects to a LAN-mode server by address. See [PRIVATE-SERVERS.md](PRIVATE-SERVERS.md) for hosting one.
 
-**Game Files** opens the private library installer described in [PRIVATE-SERVERS.md](PRIVATE-SERVERS.md). Downloading the game straight from Steam inside the app is not implemented yet; the game files come from the package or from that installer.
+## Download the game files
+
+If the app was built without `GAME_ZIP`, it has no game files yet.
+
+1. Sign in to Steam (above).
+2. Tap **Game Files**. The app asks Steam for the Campaign, Multiplayer and Zombies files your account owns and downloads them from Steam's content servers into its own storage: about 16 GB, English only. The line under the cards shows the mode, the percentage and the speed.
+3. Keep the app open and the phone on Wi-Fi and power. Tapping **Game Files** again pauses; so does leaving the app. Tap it once more to carry on: finished parts are kept and checked, not downloaded again.
+4. When it says **Game files installed**, pick a mode.
+
+Steam only hands the files to an account that owns the game. Nothing is downloaded from anywhere else, and the files are stored as Steam delivers them. Tapping **Game Files** on an app that already has downloaded files checks them against Steam and repairs any part that differs.
 
 ## Controls
 
