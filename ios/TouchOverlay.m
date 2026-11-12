@@ -4,36 +4,47 @@
 #include <math.h>
 #include <string.h>
 
-// Pads use XInput button masks. Fire and ADS are the triggers and carry no mask.
+// Pads use XInput button masks. The fire pads and ADS are the triggers and carry no mask.
 // dx, dy and size place the right-hand pads from the bottom-right corner of the
 // safe area on a 430-point-high screen. The others get their defaults in code.
+// The layout follows the usual phone shooter: a large fire pad under the right thumb
+// with the other actions around it, a second fire pad on the left, and the menu on top.
+// PRONE holds the crouch button long enough for the game to go prone; USE is the
+// reload button under the name the game gives it at doors and boxes.
 static const struct BO2Pad { const char *title; unsigned mask; CGFloat dx, dy, size; } kPads[] = {
-    {"FIRE", 0, 78, 70, 76},          {"ADS", 0, 162, 46, 60},
-    {"JUMP", 0x1000, 40, 150, 56},    {"CROUCH", 0x2000, 118, 150, 56},
-    {"RELOAD", 0x4000, 192, 118, 52}, {"SWAP", 0x8000, 40, 218, 48},
-    {"KNIFE", 0x80, 112, 208, 48},    {"FRAG", 0x200, 238, 40, 46}, {"TAC", 0x100, 292, 40, 46},
-    {"II", 0x10, 0, 0, 40}, {"SCORE", 0x20, 0, 0, 48},
+    {"FIRE", 0, 120, 110, 84},        {"ADS", 0, 52, 178, 60},
+    {"JUMP", 0x1000, 44, 96, 58},     {"CROUCH", 0x2000, 112, 34, 52},  {"PRONE", 0x2000, 48, 34, 48},
+    {"RELOAD", 0x4000, 196, 50, 52},  {"USE", 0x4000, 204, 128, 50},    {"SWAP", 0x8000, 270, 40, 50},
+    {"KNIFE", 0x80, 190, 196, 50},    {"FRAG", 0x200, 118, 200, 46},    {"TAC", 0x100, 60, 244, 46},
+    {"HIP", 0, 0, 0, 54}, {"MENU", 0x10, 0, 0, 50}, {"SCORE", 0x20, 0, 0, 48},
     {"▲", 1, 0, 0, 36}, {"▼", 2, 0, 0, 36}, {"◀", 4, 0, 0, 36}, {"▶", 8, 0, 0, 36},
 };
 enum {
-    kFire = 0, kAim = 1,
-    kRightCluster = 9,   // pads below this index sit on the right and also steer the view
-    kPause = 9, kScore = 10, kUp = 11,
+    kFire = 0, kAim = 1, kProne = 4,
+    kRightCluster = 11,  // pads below this index sit on the right and also steer the view
+    kHip = 11, kPause = 12, kScore = 13, kUp = 14,
     kPadCount = sizeof(kPads) / sizeof(kPads[0]),
     kRoleMove = -1, kRoleLook = -2, kRoleEdit = -3,
     kSprint = 0x40,      // left stick click
 };
-static NSString *const kLayoutKey = @"BO2TouchLayout";
+// The game reads the pad once a frame, so a tap is held at least this long to be seen.
+static const CFTimeInterval kMinHold = 0.12, kProneHold = 0.55;
+// FIRE raises the sights first; the shots start this long after, and a tap still fires once.
+static const CFTimeInterval kAimLead = 0.18, kTapShot = 0.10;
+static NSString *const kLayoutKey = @"BO2TouchLayout2";
 
 // Two states. "Menu" lets every touch through to the game as a mouse pointer, so
 // menus are tapped directly. "Play" shows the controls: the left side is a move
 // stick that appears under the thumb, the right side turns the view, and a drag
 // that starts on a right-hand pad keeps turning while the pad is held.
 // Multiplayer and Zombies switch to Play when the match starts and back when it ends.
+// MENU opens the game's own pause menu and hands the screen back to the pointer so
+// the menu can be tapped; the Controls button brings the pads back.
 @implementation BO2TouchOverlay {
     void (*_pad)(unsigned, bool, bool, float, float, float, float);
     void (*_cursorRead)(double *, double *);
     void (*_cursorSet)(double, double);
+    void (*_event)(uint32_t, uint32_t, uint32_t);
     uint8_t **_arena;
     uint32_t _stateAddress, _mapAddress, _clientState;
     char _map[32];
@@ -43,7 +54,8 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     NSMutableDictionary<NSString *, NSArray<NSNumber *> *> *_layout;   // title -> x, y (fractions of the safe area), size
     UIView *_stickBase, *_stickKnob, *_panel, *_editBar;
     UIButton *_modeButton, *_gear;
-    UISegmentedControl *_lookMode, *_aimMode;
+    UISegmentedControl *_lookMode, *_aimMode, *_fireMode, *_menuMode;
+    CFTimeInterval _downAt[kPadCount], _releaseAt[kPadCount], _fireLead, _menuAt;
     UISlider *_speed, *_size;
     NSMapTable<UITouch *, NSNumber *> *_roles;
     CADisplayLink *_link;
@@ -53,13 +65,14 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     NSInteger _selected;
     unsigned _held, _sentButtons;
     float _sentAxes[4];
-    BOOL _sentAim, _sentFire, _play, _moving, _sprint, _stickLook, _aimToggle, _aimLatched, _editing;
+    BOOL _sentAim, _sentFire, _play, _moving, _sprint, _stickLook, _aimToggle, _aimLatched, _editing, _hipFire, _escMenu;
 }
 - (instancetype)initWithFrame:(CGRect)frame handle:(void *)handle mode:(NSString *)mode {
     if (!(self = [super initWithFrame:frame])) return nil;
     _pad = dlsym(handle, "ios_touch_pad");
     _cursorRead = dlsym(handle, "ios_cursor_read");
     _cursorSet = dlsym(handle, "ios_cursor_set");
+    _event = dlsym(handle, "ios_game_event");
     _arena = dlsym(handle, "bo2_g_base");
     if (!_pad || !_cursorRead || !_cursorSet) return nil;
     // Guest memory the automatic switch reads. The client connection state is 10
@@ -77,6 +90,8 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     _sensitivity = speed >= 0.2 && speed <= 5 ? speed : 1;
     _stickLook = [saved boolForKey:@"BO2StickLook"];
     _aimToggle = [saved boolForKey:@"BO2AimToggle"];
+    _hipFire = [saved boolForKey:@"BO2HipFire"];
+    _escMenu = _event && [saved boolForKey:@"BO2EscMenu"];
     _layout = [([saved dictionaryForKey:kLayoutKey] ?: @{}) mutableCopy];
     _pads = [NSMutableArray array];
     for (unsigned i = 0; i < kPadCount; i++) {
@@ -84,7 +99,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
         pad.text = @(kPads[i].title);
         pad.textAlignment = NSTextAlignmentCenter;
         pad.textColor = [UIColor colorWithWhite:1 alpha:0.9];
-        pad.font = [UIFont systemFontOfSize:i == kFire ? 14 : 10 weight:UIFontWeightHeavy];
+        pad.font = [UIFont systemFontOfSize:i == kFire ? 15 : 10 weight:UIFontWeightHeavy];
         pad.adjustsFontSizeToFitWidth = YES;
         pad.layer.borderWidth = 1.5;
         pad.clipsToBounds = YES;
@@ -162,7 +177,14 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     _speed.minimumValue = 0.2;
     _speed.maximumValue = 3;
     _speed.value = (float)_sensitivity;
-    for (UIControl *control in @[_lookMode, _aimMode, _speed])
+    // FIRE either raises the sights and then shoots, or only shoots. The HIP pad always only shoots.
+    _fireMode = [[UISegmentedControl alloc] initWithItems:@[@"Aim + fire", @"Hip fire"]];
+    _fireMode.selectedSegmentIndex = _hipFire ? 1 : 0;
+    // MENU presses the pad's Start button, or the Escape key for a game that ignores Start.
+    _menuMode = [[UISegmentedControl alloc] initWithItems:@[@"Start", @"Esc key"]];
+    _menuMode.selectedSegmentIndex = _escMenu ? 1 : 0;
+    _menuMode.enabled = _event != NULL;
+    for (UIControl *control in @[_lookMode, _aimMode, _fireMode, _menuMode, _speed])
         [control addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
     UIButton *edit = [self button:@"Edit layout" action:@selector(beginEditing)];
     UIButton *reset = [self button:@"Reset layout" action:@selector(resetLayout)];
@@ -171,8 +193,18 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     buttons.distribution = UIStackViewDistributionFillEqually;
     buttons.spacing = 8;
     [buttons.heightAnchor constraintEqualToConstant:32].active = YES;
-    _panel = [self card:@[[self caption:@"Look"], _lookMode, [self caption:@"Look speed"], _speed,
-                          [self caption:@"ADS"], _aimMode, buttons] axis:UILayoutConstraintAxisVertical];
+    _panel = [self card:@[[self row:@"Look" control:_lookMode], [self row:@"Look speed" control:_speed],
+                          [self row:@"FIRE pad" control:_fireMode], [self row:@"ADS pad" control:_aimMode],
+                          [self row:@"MENU pad" control:_menuMode], buttons] axis:UILayoutConstraintAxisVertical];
+}
+- (UIView *)row:(NSString *)title control:(UIView *)control {
+    UILabel *caption = [self caption:title];
+    [caption.widthAnchor constraintEqualToConstant:76].active = YES;
+    UIStackView *row = [[UIStackView alloc] initWithArrangedSubviews:@[caption, control]];
+    row.spacing = 8;
+    row.alignment = UIStackViewAlignmentCenter;
+    [row.heightAnchor constraintEqualToConstant:32].active = YES;
+    return row;
 }
 // Shown while editing: drag a pad to move it, use the slider to resize the selected one.
 - (void)buildEditBar {
@@ -190,10 +222,14 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
 - (void)settingsChanged {
     _stickLook = _lookMode.selectedSegmentIndex == 1;
     _aimToggle = _aimMode.selectedSegmentIndex == 1;
+    _hipFire = _fireMode.selectedSegmentIndex == 1;
+    _escMenu = _event && _menuMode.selectedSegmentIndex == 1;
     _sensitivity = _speed.value;
     NSUserDefaults *saved = NSUserDefaults.standardUserDefaults;
     [saved setBool:_stickLook forKey:@"BO2StickLook"];
     [saved setBool:_aimToggle forKey:@"BO2AimToggle"];
+    [saved setBool:_hipFire forKey:@"BO2HipFire"];
+    [saved setBool:_escMenu forKey:@"BO2EscMenu"];
     [saved setDouble:_sensitivity forKey:@"BO2LookSensitivity"];
     [self resetInput];
 }
@@ -224,10 +260,13 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     CGPoint centre;
     if (i < kRightCluster) {
         centre = CGPointMake(CGRectGetMaxX(safe) - 4 - kPads[i].dx * scale, CGRectGetMaxY(safe) - 4 - kPads[i].dy * scale);
+    } else if (i == kHip) {
+        // Above the resting move stick, for the left thumb or index finger.
+        centre = CGPointMake(left + 34 * scale, CGRectGetMaxY(safe) - 216 * scale);
     } else if (i == kPause) {
-        centre = CGPointMake(left + 150, top + 20);
+        centre = CGPointMake(left + 158, top + size / 2);
     } else if (i == kScore) {
-        centre = CGPointMake(left + 204, top + 20);
+        centre = CGPointMake(left + 218, top + size / 2);
     } else {
         // Scorestreak and menu D-pad, top centre-left, out of the move thumb's way.
         CGFloat cx = left + 290 + size, cy = top + size * 1.5;
@@ -249,24 +288,34 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
                                CGRectGetMinY(safe) + custom[1].doubleValue * safe.size.height - size / 2, size, size);
         }
         _pads[i].frame = frame;
-        _pads[i].layer.cornerRadius = i < kRightCluster ? frame.size.width / 2 : 10;
+        _pads[i].layer.cornerRadius = i <= kHip ? frame.size.width / 2 : 10;
     }
     _modeButton.frame = CGRectMake(left, top, 72, 34);
     _gear.frame = CGRectMake(left + 80, top, 40, 34);
-    _panel.frame = CGRectMake(left, top + 42, 250, 252);
+    _panel.frame = CGRectMake(left, top + 42, 300, 244);
     _editBar.frame = CGRectMake(CGRectGetMidX(safe) - 190, top, 380, 46);
     _stickRadius = 60 * [self scale];
     _stickBase.bounds = CGRectMake(0, 0, _stickRadius * 2, _stickRadius * 2);
     _stickBase.layer.cornerRadius = _stickRadius;
     _stickKnob.bounds = CGRectMake(0, 0, _stickRadius * 0.9, _stickRadius * 0.9);
     _stickKnob.layer.cornerRadius = _stickRadius * 0.45;
+    [self restStick];
+}
+// While no thumb is on it, the move stick waits faintly where the left thumb rests.
+- (void)restStick {
+    if (_moving) return;
+    CGRect safe = [self safe];
+    CGPoint home = CGPointMake(CGRectGetMinX(safe) + 8 + 112 * [self scale], CGRectGetMaxY(safe) - 4 - 96 * [self scale]);
+    _stickBase.center = _stickKnob.center = home;
+    _stickBase.alpha = _stickKnob.alpha = 0.45;
+    _stickBase.hidden = _stickKnob.hidden = !_play || _editing;
 }
 - (void)stylePads {
     for (NSUInteger i = 0; i < kPadCount; i++) {
         UILabel *pad = _pads[i];
         BOOL lit = _editing ? (NSInteger)i == _selected : (i == kAim && _aimLatched) || (_held & (1u << i));
         pad.backgroundColor = lit ? [UIColor colorWithRed:1 green:0.55 blue:0.1 alpha:0.5]
-            : i == kFire ? [UIColor colorWithRed:0.75 green:0.15 blue:0.1 alpha:0.42] : [UIColor colorWithWhite:0 alpha:0.32];
+            : i == kFire || i == kHip ? [UIColor colorWithRed:0.75 green:0.15 blue:0.1 alpha:0.42] : [UIColor colorWithWhite:0 alpha:0.32];
         pad.layer.borderColor = (_editing ? [UIColor colorWithRed:1 green:0.6 blue:0.2 alpha:0.9]
                                           : [UIColor colorWithWhite:1 alpha:0.5]).CGColor;
     }
@@ -278,12 +327,14 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     _panel.hidden = YES;
     _editBar.hidden = NO;
     _size.enabled = NO;
+    [self restStick];
     [self stylePads];
 }
 - (void)endEditing {
     _editing = NO;
     _editBar.hidden = YES;
     [NSUserDefaults.standardUserDefaults setObject:_layout forKey:kLayoutKey];
+    [self restStick];
     [self stylePads];
 }
 - (void)resetLayout {
@@ -327,17 +378,23 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
 - (void)setPlay:(BOOL)play {
     if (_editing) [self endEditing];
     _play = play;
-    [_modeButton setTitle:play ? @"Menu" : @"Controls" forState:UIControlStateNormal];
+    [_modeButton setTitle:play ? @"Pointer" : @"Controls" forState:UIControlStateNormal];
     for (UIView *pad in _pads) pad.hidden = !play;
     _gear.hidden = !play;
     _panel.hidden = YES;
     [self resetInput];
 }
 - (void)toggleMode { [self setPlay:!_play]; }
+// A pad counts as pressed while a finger is on it and until its minimum hold has run out.
+- (BOOL)pressed:(unsigned)i at:(CFTimeInterval)now { return (_held & (1u << i)) || now < _releaseAt[i]; }
 - (void)publish {
+    CFTimeInterval now = CACurrentMediaTime();
     unsigned buttons = _sprint ? kSprint : 0;
-    for (unsigned i = 0; i < kPadCount; i++) if (_held & (1u << i)) buttons |= kPads[i].mask;
-    BOOL aim = _aimToggle ? _aimLatched : (_held & (1u << kAim)) != 0, fire = (_held & (1u << kFire)) != 0;
+    for (unsigned i = 0; i < kPadCount; i++)
+        if ([self pressed:i at:now] && !(i == kPause && _escMenu)) buttons |= kPads[i].mask;
+    BOOL firing = [self pressed:kFire at:now];
+    BOOL aim = (_aimToggle ? _aimLatched : [self pressed:kAim at:now]) || (firing && !_hipFire);
+    BOOL fire = (firing && now >= _downAt[kFire] + _fireLead) || [self pressed:kHip at:now];
     float axes[4] = {(float)_move.x, (float)_move.y, (float)_look.x, (float)_look.y};
     // The link ticks every frame, so only forward real changes to the game.
     if (buttons == _sentButtons && aim == _sentAim && fire == _sentFire && !memcmp(axes, _sentAxes, sizeof(axes))) return;
@@ -348,6 +405,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
 - (void)showStickAt:(CGPoint)knob {
     _stickBase.center = _moveOrigin;
     _stickKnob.center = knob;
+    _stickBase.alpha = _stickKnob.alpha = 1;
     _stickBase.hidden = _stickKnob.hidden = NO;
 }
 // The closest pad whose enlarged outline contains the point.
@@ -375,7 +433,20 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
             continue;
         }
         if (role != NSNotFound) {
+            CFTimeInterval now = CACurrentMediaTime();
+            if (role == kFire) {
+                // No wait when the sights are already up.
+                BOOL aimed = _aimToggle ? _aimLatched : [self pressed:kAim at:now];
+                _fireLead = _hipFire || aimed ? 0 : kAimLead;
+            }
+            if (role == kPause && _escMenu) {
+                _event(0x100, 0x1B, 1);            // key down, character, key up
+                _event(0x102, 0x1B, 1);
+                _event(0x101, 0x1B, 0xC0000001u);
+            }
             _held |= 1u << role;
+            _downAt[role] = now;
+            _releaseAt[role] = 0;
             if (role == kAim && _aimToggle) _aimLatched = !_aimLatched;
             [_haptic impactOccurred];
         } else if (p.x < CGRectGetWidth(self.bounds) * 0.45) {
@@ -444,9 +515,13 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
         if (role == kRoleMove) {
             _moving = _sprint = NO;
             _move = CGPointZero;
-            _stickBase.hidden = _stickKnob.hidden = YES;
-        } else if (role >= 0) {
+            [self restStick];
+        } else if (role >= 0 && (_held & (1u << role))) {
             _held &= ~(1u << role);
+            CFTimeInterval hold = role == kProne ? kProneHold : role == kFire ? _fireLead + kTapShot : kMinHold;
+            _releaseAt[role] = _downAt[role] + hold;
+            // Once the game has seen the press, give the screen to the pointer for its menu.
+            if (role == kPause) _menuAt = MAX(CACurrentMediaTime(), _releaseAt[role]) + 0.05;
         }
     }
     [self stylePads];
@@ -458,7 +533,10 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
 - (void)tick:(CADisplayLink *)link {
     // Show the controls when a match starts and give the pointer back when it ends.
     if (++_frame % 6 == 0 && _arena && *_arena) [self followGame:*_arena];
-    if (!_play || !_stickLook || _editing) return;
+    if (!_play || _editing) return;
+    if (_menuAt && CACurrentMediaTime() >= _menuAt) { [self setPlay:NO]; return; }
+    // Timed presses end between touches, so the pad state is refreshed every frame.
+    if (!_stickLook) { [self publish]; return; }
     // Stick look: about 18 points of travel per frame is a full deflection at speed 1.
     CGFloat scale = _sensitivity / 18.0;
     _lookSmooth.x = 0.4 * _lookSmooth.x + 0.6 * _lookDelta.x * scale;
@@ -500,7 +578,10 @@ static NSString *const kLayoutKey = @"BO2TouchLayout";
     _held = 0;
     _moving = _sprint = _aimLatched = NO;
     _move = _look = _lookDelta = _lookSmooth = CGPointZero;
-    _stickBase.hidden = _stickKnob.hidden = YES;
+    memset(_downAt, 0, sizeof(_downAt));
+    memset(_releaseAt, 0, sizeof(_releaseAt));
+    _fireLead = _menuAt = 0;
+    [self restStick];
     [self stylePads];
     _sentButtons = ~0u;   // force one publish so the game always sees the release
     [self publish];
