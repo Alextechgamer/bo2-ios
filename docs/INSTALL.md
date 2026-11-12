@@ -33,6 +33,7 @@ There is no ready-made IPA and there cannot be one: the app contains the game's 
    - **Signed with Xcode:** add `TEAM=<your team id>`. The IPA installs on devices registered to that team.
    - **Unsigned:** leave `TEAM` out, then sign `$WORK/out/BlackOpsII.ipa` with SideStore or a signing service.
    - **Game files inside the app:** add `GAME_ZIP=<zip of your game folder>`. The IPA is then about 16 GB, too large for most signing tools.
+   - **No receipt:** leave `RECEIPT` out and skip step 1. The app then holds no account, and every mode, local play included, starts on the Steam account signed in on the phone. Not yet run on a phone.
    - **Online play:** the Steam network transport is linked into Multiplayer and Zombies by default, and the launcher offers online play for both. `ONLINE=0` leaves it out.
    - **Private servers:** linked into Zombies by default. Multiplayer also needs `PLUTO_LUA_ZIP=<zip>`, your own capture of the nine interface scripts an r5369 server sends; without it Multiplayer is built without the private-server transport and the setup says so. `PRIVATE_SERVER=0` leaves it out of both.
    - **Game files downloaded afterwards:** without `GAME_ZIP` the app starts with no game files and says so. Sign in to Steam in the app and tap **Game Files**; see [Download the game files](#download-the-game-files). The private library installer in [PRIVATE-SERVERS.md](PRIVATE-SERVERS.md) is still there: pass its address as `LIBRARY_ORIGIN=<https origin>` and **Game Files** offers both.

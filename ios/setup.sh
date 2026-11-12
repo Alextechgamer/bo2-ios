@@ -24,7 +24,7 @@
 #   BO2_INPUTS   default ~/.bo2-native/steam
 #   MODES        default "sps mps zms"
 #   JOBS         parallel compiles, default 3
-#   RECEIPT      your SteamOwnership.plist from ios/steam_receipt.py        (package)
+#   RECEIPT      your SteamOwnership.plist from ios/steam_receipt.py; without it every mode needs a Steam sign-in (package)
 #   BUNDLE_ID    your bundle identifier, for example com.example.bo2        (package)
 #   TEAM         your Apple team. Leave unset for an unsigned IPA to sign with SideStore or a signing service.
 #   GAME_ZIP     a ZIP of your game folder to put inside the app. Without it the app starts with no game files.
@@ -174,16 +174,17 @@ stage_link() {
 }
 
 stage_package() {
-  [ -n "${RECEIPT:-}" ] && [ -n "${BUNDLE_ID:-}" ] || die "set RECEIPT and BUNDLE_ID for the package stage"
+  [ -n "${BUNDLE_ID:-}" ] || die "set BUNDLE_ID for the package stage"
   mkdir -p "$ROOT/out" "$ROOT/package-work"
   options=""
   [ -n "${TEAM:-}" ] && options="--team $TEAM" || options="--unsigned"
   [ -n "${GAME_ZIP:-}" ] || options="$options --shell-only"
   [ -z "${LIBRARY_ORIGIN:-}" ] || options="$options --library-origin $LIBRARY_ORIGIN"
   [ -z "${SERVER_IP:-}" ] || options="$options --private-server $SERVER_IP"
+  [ -z "${RECEIPT:-}" ] || options="$options --receipt $RECEIPT"
   # shellcheck disable=SC2086
   python3 "$HERE/package_game.py" "$ROOT" "${GAME_ZIP:-none}" "$ROOT/out/BlackOpsII.ipa" "$ROOT/package-work" \
-    --bundle-id "$BUNDLE_ID" --receipt "$RECEIPT" $options
+    --bundle-id "$BUNDLE_ID" $options
   say "IPA: $ROOT/out/BlackOpsII.ipa"
 }
 

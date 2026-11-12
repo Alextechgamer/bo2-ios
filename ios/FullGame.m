@@ -443,13 +443,19 @@ static void EndRunLog(void) {
             [self startSteam:mode online:YES];
         }]];
         [menu addAction:[UIAlertAction actionWithTitle:@"Play Local" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            [self start:mode];
+            [self startLocal:mode];
         }]];
         [menu addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:menu animated:YES completion:nil];
         return;
     }
-    [self start:sender.accessibilityIdentifier];
+    [self startLocal:mode];
+}
+// A build with an ownership receipt starts local play from it. A build without one has no
+// account of its own, so local play also runs on the signed-in Steam session, which checks ownership.
+- (void)startLocal:(NSString *)mode {
+    if ([NSBundle.mainBundle URLForResource:@"SteamOwnership" withExtension:@"plist"]) [self start:mode];
+    else [self startSteam:mode online:NO];
 }
 - (void)steamInstall {
     if(_installer || _started || _checking) return;

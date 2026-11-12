@@ -112,7 +112,8 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         for name in ("COPYING","LICENSE-EXCEPTION.md","UPSTREAM.md"):
             shutil.copyfile(src/"SteamAuth"/name,notices/name)
         shutil.copyfile(src/"SteamServices/Content/ZSTD-LICENSE",notices/"ZSTD-LICENSE")
-        shutil.copyfile(receipt, app/"SteamOwnership.plist")
+        # Without a receipt the app holds no account: every mode then starts on the signed-in Steam session.
+        if receipt: shutil.copyfile(receipt, app/"SteamOwnership.plist")
         frameworks=app/"Frameworks"
         frameworks.mkdir(exist_ok=True)
         for mode in MODES:
@@ -155,7 +156,7 @@ if __name__=="__main__":
     p.add_argument("--unsigned", action="store_true", help="Build without signing, for SideStore or a signing service")
     p.add_argument("--shell-only", action="store_true", help="Leave the game files out; game_zip is then ignored")
     p.add_argument("--bundle-id", required=True, help="Your registered app bundle identifier")
-    p.add_argument("--receipt", required=True, type=Path, help="Your private Steam ownership plist")
+    p.add_argument("--receipt", type=Path, help="Your private Steam ownership plist; leave out for a build that holds no account")
     p.add_argument("--library-origin", help="HTTPS origin of your private installation service")
     p.add_argument("--lan-root", type=Path, help="Prebuilt LAN frameworks and sections in mps/ and zms/")
     p.add_argument("--private-server", type=IPv4Address, help="Private IPv4 gateway preset for the Join menu and USB fallback")
