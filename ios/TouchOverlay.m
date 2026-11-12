@@ -273,7 +273,8 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2", *const kGamepadLayoutKey
     _link = nil;
     if (!self.window) { [self resetInput]; return; }
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
-    _link.preferredFramesPerSecond = 60;
+    // A link that asks for 60 keeps a 120 Hz screen at 60 for the game as well, so ask for the screen's best.
+    _link.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
