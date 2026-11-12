@@ -11,18 +11,33 @@
 // with the other actions around it, a second fire pad on the left, and the menu on top.
 // PRONE holds the crouch button long enough for the game to go prone; USE is the
 // reload button under the name the game gives it at doors and boxes.
-static const struct BO2Pad { const char *title; unsigned mask; CGFloat dx, dy, size; } kPads[] = {
-    {"FIRE", 0, 120, 110, 84},        {"ADS", 0, 52, 178, 60},
-    {"JUMP", 0x1000, 44, 96, 58},     {"CROUCH", 0x2000, 112, 34, 52},  {"PRONE", 0x2000, 48, 34, 48},
-    {"RELOAD", 0x4000, 196, 50, 52},  {"USE", 0x4000, 204, 128, 50},    {"SWAP", 0x8000, 270, 40, 50},
-    {"KNIFE", 0x80, 190, 196, 50},    {"FRAG", 0x200, 118, 200, 46},    {"TAC", 0x100, 60, 244, 46},
-    {"HIP", 0, 0, 0, 54}, {"MENU", 0x10, 0, 0, 50}, {"SCORE", 0x20, 0, 0, 48},
-    {"▲", 1, 0, 0, 36}, {"▼", 2, 0, 0, 36}, {"◀", 4, 0, 0, 36}, {"▶", 8, 0, 0, 36},
+//
+// The second layout is the on-screen gamepad of CyPort (https://github.com/Thijs2004/CyPort,
+// shim/MacShim.m, MIT, Copyright (c) 2026 Thijs Mussig): the same pads under their Xbox names at
+// CyPort's positions and sizes. `pad` is that name, `corner` the screen corner px and py are
+// measured from, and pr the radius. A pad without a name is not part of that layout.
+// The triggers and bumpers sit 22 points lower than CyPort's, clear of this app's frame counter.
+enum { kNone, kRightBottom, kRightTop, kLeftTop, kLeftBottom, kCentreTop };
+static const struct BO2Pad { const char *title; unsigned mask; CGFloat dx, dy, size;
+                             const char *pad; int corner; CGFloat px, py, pr; } kPads[] = {
+    {"FIRE", 0, 120, 110, 84, "RT", kRightTop, 40, 62, 30},        {"ADS", 0, 52, 178, 60, "LT", kLeftTop, 40, 62, 30},
+    {"JUMP", 0x1000, 44, 96, 58, "A", kRightBottom, 85, 40, 27},   {"CROUCH", 0x2000, 112, 34, 52, "B", kRightBottom, 35, 90, 27},
+    {"PRONE", 0x2000, 48, 34, 48},
+    {"RELOAD", 0x4000, 196, 50, 52, "X", kRightBottom, 135, 90, 27}, {"USE", 0x4000, 204, 128, 50},
+    {"SWAP", 0x8000, 270, 40, 50, "Y", kRightBottom, 85, 140, 27},
+    {"KNIFE", 0x80, 190, 196, 50, "R3", kRightBottom, 170, 22, 20},
+    {"FRAG", 0x200, 118, 200, 46, "RB", kRightTop, 115, 56, 24},   {"TAC", 0x100, 60, 244, 46, "LB", kLeftTop, 115, 56, 24},
+    {"HIP", 0, 0, 0, 54},
+    {"MENU", 0x10, 0, 0, 50, "≡", kCentreTop, 55, 20, 17},          {"SCORE", 0x20, 0, 0, 48, "⧉", kCentreTop, -55, 20, 17},
+    {"▲", 1, 0, 0, 36, "▲", kLeftTop, 190, 22, 16}, {"▼", 2, 0, 0, 36, "▼", kLeftTop, 190, 86, 16},
+    {"◀", 4, 0, 0, 36, "◀", kLeftTop, 158, 54, 16}, {"▶", 8, 0, 0, 36, "▶", kLeftTop, 222, 54, 16},
+    // Only in the gamepad layout: the left stick click (sprint) and the Escape key.
+    {"L3", 0x40, 0, 0, 40, "L3", kLeftBottom, 24, 24, 20},          {"ESC", 0, 0, 0, 40, "Esc", kCentreTop, -120, 20, 19},
 };
 enum {
     kFire = 0, kAim = 1, kProne = 4,
-    kRightCluster = 11,  // pads below this index sit on the right and also steer the view
-    kHip = 11, kPause = 12, kScore = 13, kUp = 14,
+    kRightCluster = 11,  // pads below this index also steer the view while they sit on the right
+    kHip = 11, kPause = 12, kScore = 13, kUp = 14, kGamepadOnly = 18, kEscape = 19,
     kPadCount = sizeof(kPads) / sizeof(kPads[0]),
     kRoleMove = -1, kRoleLook = -2, kRoleEdit = -3,
     kSprint = 0x40,      // left stick click
@@ -31,7 +46,7 @@ enum {
 static const CFTimeInterval kMinHold = 0.12, kProneHold = 0.55;
 // FIRE raises the sights first; the shots start this long after, and a tap still fires once.
 static const CFTimeInterval kAimLead = 0.18, kTapShot = 0.10;
-static NSString *const kLayoutKey = @"BO2TouchLayout2";
+static NSString *const kLayoutKey = @"BO2TouchLayout2", *const kGamepadLayoutKey = @"BO2TouchLayoutPad";
 
 // Two states. "Menu" lets every touch through to the game as a mouse pointer, so
 // menus are tapped directly. "Play" shows the controls: the left side is a move
@@ -54,8 +69,9 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     NSMutableDictionary<NSString *, NSArray<NSNumber *> *> *_layout;   // title -> x, y (fractions of the safe area), size
     UIView *_stickBase, *_stickKnob, *_panel, *_editBar;
     UIButton *_modeButton, *_gear;
-    UISegmentedControl *_lookMode, *_aimMode, *_fireMode, *_menuMode;
-    CFTimeInterval _downAt[kPadCount], _releaseAt[kPadCount], _fireLead, _menuAt;
+    UISegmentedControl *_lookMode, *_aimMode, *_fireMode, *_menuMode, *_style;
+    CFTimeInterval _downAt[kPadCount], _releaseAt[kPadCount], _fireLead, _menuAt, _lookAt;
+    BOOL _gamepad;
     UISlider *_speed, *_size;
     NSMapTable<UITouch *, NSNumber *> *_roles;
     CADisplayLink *_link;
@@ -92,7 +108,8 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     _aimToggle = [saved boolForKey:@"BO2AimToggle"];
     _hipFire = [saved boolForKey:@"BO2HipFire"];
     _escMenu = _event && [saved boolForKey:@"BO2EscMenu"];
-    _layout = [([saved dictionaryForKey:kLayoutKey] ?: @{}) mutableCopy];
+    _gamepad = ![saved boolForKey:@"BO2ShooterPads"];
+    _layout = [([saved dictionaryForKey:[self layoutKey]] ?: @{}) mutableCopy];
     _pads = [NSMutableArray array];
     for (unsigned i = 0; i < kPadCount; i++) {
         UILabel *pad = [UILabel new];
@@ -184,7 +201,9 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     _menuMode = [[UISegmentedControl alloc] initWithItems:@[@"Start", @"Esc key"]];
     _menuMode.selectedSegmentIndex = _escMenu ? 1 : 0;
     _menuMode.enabled = _event != NULL;
-    for (UIControl *control in @[_lookMode, _aimMode, _fireMode, _menuMode, _speed])
+    _style = [[UISegmentedControl alloc] initWithItems:@[@"Gamepad", @"Shooter"]];
+    _style.selectedSegmentIndex = _gamepad ? 0 : 1;
+    for (UIControl *control in @[_lookMode, _aimMode, _fireMode, _menuMode, _style, _speed])
         [control addTarget:self action:@selector(settingsChanged) forControlEvents:UIControlEventValueChanged];
     UIButton *edit = [self button:@"Edit layout" action:@selector(beginEditing)];
     UIButton *reset = [self button:@"Reset layout" action:@selector(resetLayout)];
@@ -193,7 +212,8 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     buttons.distribution = UIStackViewDistributionFillEqually;
     buttons.spacing = 8;
     [buttons.heightAnchor constraintEqualToConstant:32].active = YES;
-    _panel = [self card:@[[self row:@"Look" control:_lookMode], [self row:@"Look speed" control:_speed],
+    _panel = [self card:@[[self row:@"Layout" control:_style],
+                          [self row:@"Look" control:_lookMode], [self row:@"Look speed" control:_speed],
                           [self row:@"FIRE pad" control:_fireMode], [self row:@"ADS pad" control:_aimMode],
                           [self row:@"MENU pad" control:_menuMode], buttons] axis:UILayoutConstraintAxisVertical];
 }
@@ -225,6 +245,15 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     _hipFire = _fireMode.selectedSegmentIndex == 1;
     _escMenu = _event && _menuMode.selectedSegmentIndex == 1;
     _sensitivity = _speed.value;
+    BOOL gamepad = _style.selectedSegmentIndex == 0;
+    if (gamepad != _gamepad) {
+        // Each layout keeps its own moved pads.
+        _gamepad = gamepad;
+        [NSUserDefaults.standardUserDefaults setBool:!gamepad forKey:@"BO2ShooterPads"];
+        _layout = [([NSUserDefaults.standardUserDefaults dictionaryForKey:[self layoutKey]] ?: @{}) mutableCopy];
+        for (NSUInteger i = 0; i < kPadCount; i++) _pads[i].hidden = !_play || ![self shown:i];
+        [self setNeedsLayout];
+    }
     NSUserDefaults *saved = NSUserDefaults.standardUserDefaults;
     [saved setBool:_stickLook forKey:@"BO2StickLook"];
     [saved setBool:_aimToggle forKey:@"BO2AimToggle"];
@@ -251,9 +280,35 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
 #pragma mark Layout
 
 - (CGRect)safe { return UIEdgeInsetsInsetRect(self.bounds, self.safeAreaInsets); }
+- (NSString *)layoutKey { return _gamepad ? kGamepadLayoutKey : kLayoutKey; }
+- (BOOL)shown:(NSUInteger)i { return _gamepad ? kPads[i].corner != kNone : i < kGamepadOnly; }
+// The area CyPort lays its pad out in: the safe area, at least 16 points in from the sides and 8 from top and bottom.
+- (CGRect)padArea {
+    UIEdgeInsets in = self.safeAreaInsets;
+    CGSize size = self.bounds.size;
+    CGFloat left = MAX(in.left, 16), top = MAX(in.top, 8);
+    return CGRectMake(left, top, size.width - MAX(in.right, 16) - left, size.height - MAX(in.bottom, 8) - top);
+}
+// Where the move stick rests.
+- (CGPoint)stickHome {
+    if (_gamepad) { CGRect area = [self padArea]; return CGPointMake(CGRectGetMinX(area) + 115, CGRectGetMaxY(area) - 105); }
+    CGRect safe = [self safe];
+    return CGPointMake(CGRectGetMinX(safe) + 8 + 112 * [self scale], CGRectGetMaxY(safe) - 4 - 96 * [self scale]);
+}
 - (CGFloat)scale { return MAX(0.8, MIN(1.2, [self safe].size.height / 430)); }
 // Centre and size of a pad before the player moves it.
 - (CGRect)defaultFrame:(NSUInteger)i {
+    if (_gamepad) {
+        const struct BO2Pad *pad = &kPads[i];
+        CGRect area = [self padArea];
+        CGFloat r = pad->pr, x, y = pad->corner == kRightBottom || pad->corner == kLeftBottom
+            ? CGRectGetMaxY(area) - pad->py : CGRectGetMinY(area) + pad->py;
+        if (pad->corner == kNone) return CGRectZero;
+        if (pad->corner == kCentreTop) x = CGRectGetMidX(self.bounds) + pad->px;
+        else if (pad->corner == kLeftTop || pad->corner == kLeftBottom) x = CGRectGetMinX(area) + pad->px;
+        else x = CGRectGetMaxX(area) - pad->px;
+        return CGRectMake(x - r, y - r, 2 * r, 2 * r);
+    }
     CGRect safe = [self safe];
     CGFloat scale = [self scale], size = kPads[i].size * scale;
     CGFloat left = CGRectGetMinX(safe) + 8, top = CGRectGetMinY(safe) + 4;
@@ -282,17 +337,29 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     for (NSUInteger i = 0; i < kPadCount; i++) {
         CGRect frame = [self defaultFrame:i];
         NSArray<NSNumber *> *custom = _layout[@(kPads[i].title)];
-        if (custom.count == 3) {
+        const char *name = _gamepad && kPads[i].pad ? kPads[i].pad : kPads[i].title;
+        _pads[i].text = @(name);
+        _pads[i].font = [UIFont systemFontOfSize:!_gamepad ? (i == kFire ? 15 : 10) : strlen(name) > 2 ? 9 : 13
+                                          weight:_gamepad ? UIFontWeightBold : UIFontWeightHeavy];
+        if (custom.count == 3 && [self shown:i]) {
             CGFloat size = MAX(30, MIN(120, custom[2].doubleValue));
             frame = CGRectMake(CGRectGetMinX(safe) + custom[0].doubleValue * safe.size.width - size / 2,
                                CGRectGetMinY(safe) + custom[1].doubleValue * safe.size.height - size / 2, size, size);
         }
         _pads[i].frame = frame;
-        _pads[i].layer.cornerRadius = i <= kHip ? frame.size.width / 2 : 10;
+        _pads[i].layer.cornerRadius = _gamepad || i <= kHip ? frame.size.width / 2 : 10;
     }
-    _modeButton.frame = CGRectMake(left, top, 72, 34);
-    _gear.frame = CGRectMake(left + 80, top, 40, 34);
-    _panel.frame = CGRectMake(left, top + 42, 300, 244);
+    if (_gamepad) {
+        // The top corners belong to the triggers, so the two buttons sit in the top centre, where CyPort has its own.
+        CGFloat mid = CGRectGetMidX(self.bounds), y = CGRectGetMinY([self padArea]) + 3;
+        _gear.frame = CGRectMake(mid - 18, y, 36, 34);
+        _modeButton.frame = CGRectMake(mid + 100, y, 72, 34);
+        _panel.frame = CGRectMake(mid - 150, y + 40, 300, 282);
+    } else {
+        _modeButton.frame = CGRectMake(left, top, 72, 34);
+        _gear.frame = CGRectMake(left + 80, top, 40, 34);
+        _panel.frame = CGRectMake(left, top + 42, 300, 282);
+    }
     _editBar.frame = CGRectMake(CGRectGetMidX(safe) - 190, top, 380, 46);
     _stickRadius = 60 * [self scale];
     _stickBase.bounds = CGRectMake(0, 0, _stickRadius * 2, _stickRadius * 2);
@@ -304,9 +371,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
 // While no thumb is on it, the move stick waits faintly where the left thumb rests.
 - (void)restStick {
     if (_moving) return;
-    CGRect safe = [self safe];
-    CGPoint home = CGPointMake(CGRectGetMinX(safe) + 8 + 112 * [self scale], CGRectGetMaxY(safe) - 4 - 96 * [self scale]);
-    _stickBase.center = _stickKnob.center = home;
+    _stickBase.center = _stickKnob.center = [self stickHome];
     _stickBase.alpha = _stickKnob.alpha = 0.45;
     _stickBase.hidden = _stickKnob.hidden = !_play || _editing;
 }
@@ -314,7 +379,8 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     for (NSUInteger i = 0; i < kPadCount; i++) {
         UILabel *pad = _pads[i];
         BOOL lit = _editing ? (NSInteger)i == _selected : (i == kAim && _aimLatched) || (_held & (1u << i));
-        pad.backgroundColor = lit ? [UIColor colorWithRed:1 green:0.55 blue:0.1 alpha:0.5]
+        pad.backgroundColor = _gamepad ? [UIColor colorWithWhite:1 alpha:lit ? 0.45 : 0.12]
+            : lit ? [UIColor colorWithRed:1 green:0.55 blue:0.1 alpha:0.5]
             : i == kFire || i == kHip ? [UIColor colorWithRed:0.75 green:0.15 blue:0.1 alpha:0.42] : [UIColor colorWithWhite:0 alpha:0.32];
         pad.layer.borderColor = (_editing ? [UIColor colorWithRed:1 green:0.6 blue:0.2 alpha:0.9]
                                           : [UIColor colorWithWhite:1 alpha:0.5]).CGColor;
@@ -333,13 +399,13 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
 - (void)endEditing {
     _editing = NO;
     _editBar.hidden = YES;
-    [NSUserDefaults.standardUserDefaults setObject:_layout forKey:kLayoutKey];
+    [NSUserDefaults.standardUserDefaults setObject:_layout forKey:[self layoutKey]];
     [self restStick];
     [self stylePads];
 }
 - (void)resetLayout {
     [_layout removeAllObjects];
-    [NSUserDefaults.standardUserDefaults removeObjectForKey:kLayoutKey];
+    [NSUserDefaults.standardUserDefaults removeObjectForKey:[self layoutKey]];
     [self setNeedsLayout];
 }
 // Record a pad's frame as fractions of the safe area, so it survives rotation and other screens.
@@ -379,7 +445,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     if (_editing) [self endEditing];
     _play = play;
     [_modeButton setTitle:play ? @"Pointer" : @"Controls" forState:UIControlStateNormal];
-    for (UIView *pad in _pads) pad.hidden = !play;
+    for (NSUInteger i = 0; i < kPadCount; i++) _pads[i].hidden = !play || ![self shown:i];
     _gear.hidden = !play;
     _panel.hidden = YES;
     [self resetInput];
@@ -414,6 +480,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     CGFloat nearest = CGFLOAT_MAX;
     for (NSUInteger i = 0; i < _pads.count; i++) {
         CGRect frame = _pads[i].frame;
+        if (_pads[i].hidden) continue;
         CGFloat distance = hypot(p.x - CGRectGetMidX(frame), p.y - CGRectGetMidY(frame));
         if (CGRectContainsPoint(CGRectInset(frame, -8, -8), p) && distance < nearest) { nearest = distance; found = (NSInteger)i; }
     }
@@ -439,7 +506,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
                 BOOL aimed = _aimToggle ? _aimLatched : [self pressed:kAim at:now];
                 _fireLead = _hipFire || aimed ? 0 : kAimLead;
             }
-            if (role == kPause && _escMenu) {
+            if (_event && ((role == kPause && _escMenu) || role == kEscape)) {
                 _event(0x100, 0x1B, 1);            // key down, character, key up
                 _event(0x102, 0x1B, 1);
                 _event(0x101, 0x1B, 0xC0000001u);
@@ -453,7 +520,9 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
             if (_moving) continue;   // one move stick; extra fingers on the left do nothing
             role = kRoleMove;
             _moving = YES;
-            _moveOrigin = p;
+            // On the resting stick the stick stays put; anywhere else it starts under the thumb.
+            CGPoint home = [self stickHome];
+            _moveOrigin = hypot(p.x - home.x, p.y - home.y) <= 85 ? home : p;
             [self showStickAt:p];
         } else {
             role = kRoleLook;
@@ -476,7 +545,11 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
             [self storePad:_selected];
         } else if (role == kRoleMove) {
             CGFloat dx = p.x - _moveOrigin.x, dy = p.y - _moveOrigin.y, length = hypot(dx, dy);
-            if (length > _stickRadius) {
+            if (length > _stickRadius && _gamepad) {
+                // The gamepad's stick stays where it is and the knob stops at its rim.
+                p = CGPointMake(_moveOrigin.x + dx / length * _stickRadius, _moveOrigin.y + dy / length * _stickRadius);
+                dx = p.x - _moveOrigin.x; dy = p.y - _moveOrigin.y;
+            } else if (length > _stickRadius) {
                 // Drag the base along so the thumb never runs off the stick.
                 _moveOrigin.x = p.x - dx / length * _stickRadius;
                 _moveOrigin.y = p.y - dy / length * _stickRadius;
@@ -488,12 +561,13 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
             _move = CGPointMake(dx / _stickRadius * gain, -dy / _stickRadius * gain);
             _sprint = tilt > 0.94 && _move.y > 0.75;
             [self showStickAt:p];
-        } else if (role == kRoleLook || role < kRightCluster) {
+        } else if (role == kRoleLook || (role < kRightCluster && _pads[role].center.x > CGRectGetWidth(self.bounds) * 0.45)) {
             CGPoint before = [touch previousLocationInView:self];
             CGFloat dx = p.x - before.x, dy = p.y - before.y;
             if (_stickLook) {
                 _lookDelta.x += dx;
                 _lookDelta.y += dy;
+                _lookAt = CACurrentMediaTime();
             } else {
                 // Swipe look: the game reads pointer travel exactly as it reads a mouse.
                 // Faster swipes turn a little further, as mouse acceleration does.
@@ -537,17 +611,25 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     if (_menuAt && CACurrentMediaTime() >= _menuAt) { [self setPlay:NO]; return; }
     // Timed presses end between touches, so the pad state is refreshed every frame.
     if (!_stickLook) { [self publish]; return; }
-    // Stick look: about 18 points of travel per frame is a full deflection at speed 1.
-    CGFloat scale = _sensitivity / 18.0;
-    _lookSmooth.x = 0.4 * _lookSmooth.x + 0.6 * _lookDelta.x * scale;
-    _lookSmooth.y = 0.4 * _lookSmooth.y - 0.6 * _lookDelta.y * scale;
+    // Stick look, after CyPort's MSLookFlushStick: finger speed over the last frame becomes the right stick,
+    // full at about 650 points a second at speed 1, lightly smoothed, with a curve so slow swipes still turn
+    // and a quick ease back to centre once the finger rests or lifts.
+    CFTimeInterval dt = MAX(1 / 240.0, MIN(0.1, link.targetTimestamp - link.timestamp));
+    CGFloat full = 650 / _sensitivity, rx = _lookDelta.x / dt / full, ry = -_lookDelta.y / dt / full;
+    BOOL fingerMoving = _lookAt && CACurrentMediaTime() - _lookAt < 0.06;
+    if (fingerMoving || _lookDelta.x || _lookDelta.y) {
+        _lookSmooth = CGPointMake(_lookSmooth.x * 0.2 + rx * 0.8, _lookSmooth.y * 0.2 + ry * 0.8);
+    } else {
+        _lookSmooth = CGPointMake(_lookSmooth.x * 0.35, _lookSmooth.y * 0.35);
+        if (fabs(_lookSmooth.x) < 0.03 && fabs(_lookSmooth.y) < 0.03) _lookSmooth = CGPointZero;
+    }
     _lookDelta = CGPointZero;
     CGFloat length = hypot(_lookSmooth.x, _lookSmooth.y);
-    if (length < 0.03) {
-        _lookSmooth = _look = CGPointZero;
+    if (length < 0.001) {
+        _look = CGPointZero;
     } else {
-        // Start above the game's stick dead zone so slow swipes still turn.
-        CGFloat out = 0.22 + 0.78 * MIN(1.0, length);
+        // The curve starts above the game's own stick dead zone.
+        CGFloat out = 0.2 + 0.8 * pow(MIN(1.0, length), 0.6);
         _look = CGPointMake(_lookSmooth.x / length * out, _lookSmooth.y / length * out);
     }
     [self publish];
@@ -580,7 +662,7 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2";
     _move = _look = _lookDelta = _lookSmooth = CGPointZero;
     memset(_downAt, 0, sizeof(_downAt));
     memset(_releaseAt, 0, sizeof(_releaseAt));
-    _fireLead = _menuAt = 0;
+    _fireLead = _menuAt = _lookAt = 0;
     [self restStick];
     [self stylePads];
     _sentButtons = ~0u;   // force one publish so the game always sees the release

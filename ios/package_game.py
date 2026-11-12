@@ -100,6 +100,8 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         info_path=app/"Info.plist"
         info=plistlib.loads(info_path.read_bytes())
         info["NSLocalNetworkUsageDescription"] = "Connect to a private game server on your local network."
+        # Without this an iPhone shows at most 60 frames a second, whatever the game's own limit is.
+        info["CADisableMinimumFrameDurationOnPhone"] = True
         if private_server:
             info["BO2PrivateServer"] = str(private_server)
         if library_origin:
@@ -112,6 +114,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         for name in ("COPYING","LICENSE-EXCEPTION.md","UPSTREAM.md"):
             shutil.copyfile(src/"SteamAuth"/name,notices/name)
         shutil.copyfile(src/"SteamServices/Content/ZSTD-LICENSE",notices/"ZSTD-LICENSE")
+        shutil.copyfile(src/"CYPORT-LICENSE",notices/"CYPORT-LICENSE")
         # Without a receipt the app holds no account: every mode then starts on the signed-in Steam session.
         if receipt: shutil.copyfile(receipt, app/"SteamOwnership.plist")
         frameworks=app/"Frameworks"
