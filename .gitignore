@@ -49,6 +49,7 @@
 !/ios/plutonium_sections.py
 !/ios/runtime.patch
 !/ios/frame-timing.patch
+!/ios/controller-friction.patch
 !/ios/setup.sh
 !/ios/runtime_catalog.py
 !/ios/steam_install_server.py
