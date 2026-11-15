@@ -1,0 +1,55 @@
+--- a/runtime/gfx/metal_backend.mm
++++ b/runtime/gfx/metal_backend.mm
+@@ -1682,6 +1682,8 @@
+ // celui de l'image que la pompe encode (`draws`, re-encodee tant qu'aucune neuve
+ // n'arrive). C'est l'horloge de gfx_release_texture.
+ uint64_t g_rd_seq = 0, g_rd_frame_seq = 0;
++// Published and consumed with the draw list under g_rd_mu.
++static double g_ready_time = 0;
+ std::atomic<uint64_t> g_draws_seq{0};
+ // A PER-FRAME RECORD CAP IS A HEAD CUT, NOT A THROTTLE. This list was bounded at
+ // 1024 records while the frontend submits several thousand draws per frame AND
+@@ -2720,6 +2722,10 @@
+     if (contenu) {
+         g_rd_frame.swap(g_rd);
+         g_rd_frame_seq = ++g_rd_seq;
++        double now = CACurrentMediaTime();
++        double interval = g_ready_time ? (now - g_ready_time) * 1000 : -1;
++        g_ready_time = now;
++        fprintf(stderr, "[frame-ready] %llu %.3f\n", (unsigned long long)g_rd_frame_seq, interval);
+     } else {
+         static uint64_t skipped = 0;
+         if (++skipped == 1 || (skipped % 500) == 0)
+@@ -4134,6 +4140,8 @@
+         if (!drawable) { g_drawables_nil++; return true; }   // transient; try again next pump
+ 
+         g_frames.fetch_add(1);
++        uint64_t timed_seq = 0;
++        double timed_ready = 0, timed_pickup = 0;
+         g_present_fresh = false;      // [PRESENT] : pose a vrai plus bas seulement si l'image est neuve
+ 
+         // 🪤 THIS PASS USED TO CLEAR, AND IT IS ENCODED *AFTER* THE ENGINE'S OWN
+@@ -4193,6 +4201,9 @@
+             bool fresh = false;
+             { std::lock_guard<std::mutex> lk(g_rd_mu);
+               if (!g_rd_frame.recs.empty()) { draws_f.clear(); draws_f.swap(g_rd_frame); fresh = true;
++                                         timed_seq = g_rd_frame_seq;
++                                         timed_ready = g_ready_time;
++                                         timed_pickup = CACurrentMediaTime();
+                                          g_draws_seq.store(g_rd_frame_seq);
+                                          // BO2_DEPTH_DSV witness: depth now persists across frames, D3D11 never skips one, we do.
+                                          static uint64_t seq_prise = 0;
+@@ -6368,7 +6379,13 @@
+                 fprintf(stderr, "[gfx] tampon de commandes EN ERREUR : %s\n",
+                         b.error ? b.error.localizedDescription.UTF8String : "?");
+         }];
++        double commitStart = timed_seq ? CACurrentMediaTime() : 0;
+         [cb commit];
++        if (timed_seq) {
++            fprintf(stderr, "[frame-submit] %llu %.3f %.3f %.3f\n",
++                    (unsigned long long)timed_seq, (timed_pickup - timed_ready) * 1000,
++                    (commitStart - timed_pickup) * 1000, (commitStart - timed_ready) * 1000);
++        }
+         hud_tick();
+         present_report();
+         if (shot_now && g_shot_buf) {

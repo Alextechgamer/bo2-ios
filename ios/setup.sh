@@ -85,6 +85,10 @@ stage_source() {
     git -C "$ROOT/conversion" apply -p1 "$HERE/runtime.patch"
     touch "$ROOT/conversion/.ios-patched"
   fi
+  if [ ! -f "$ROOT/conversion/.ios-frame-timing" ]; then
+    git -C "$ROOT/conversion" apply -p1 "$HERE/frame-timing.patch"
+    touch "$ROOT/conversion/.ios-frame-timing"
+  fi
   say "source ready"
 }
 

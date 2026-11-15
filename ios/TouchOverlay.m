@@ -75,6 +75,8 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2", *const kGamepadLayoutKey
     UISlider *_speed, *_size;
     NSMapTable<UITouch *, NSNumber *> *_roles;
     CADisplayLink *_link;
+    CFTimeInterval _sampleStart;
+    NSUInteger _sampleTicks;
     UIImpactFeedbackGenerator *_haptic;
     CGPoint _moveOrigin, _move, _look, _lookDelta, _lookSmooth, _grab;
     CGFloat _stickRadius, _sensitivity;
@@ -274,7 +276,10 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2", *const kGamepadLayoutKey
     if (!self.window) { [self resetInput]; return; }
     _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
     // A link that asks for 60 keeps a 120 Hz screen at 60 for the game as well, so ask for the screen's best.
-    _link.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);
+    float hz = MAX(1, self.window.screen.maximumFramesPerSecond);
+    _link.preferredFrameRateRange = CAFrameRateRangeMake(hz, hz, hz);
+    _sampleStart = 0;
+    _sampleTicks = 0;
     [_link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
 }
 
@@ -606,6 +611,18 @@ static NSString *const kLayoutKey = @"BO2TouchLayout2", *const kGamepadLayoutKey
     [self touchesEnded:touches withEvent:event];
 }
 - (void)tick:(CADisplayLink *)link {
+    if (!_sampleStart) _sampleStart = link.timestamp;
+    else ++_sampleTicks;
+    CFTimeInterval elapsed = link.timestamp - _sampleStart;
+    if (elapsed >= 2) {
+        double interval = link.targetTimestamp - link.timestamp;
+        NSProcessInfo *device = NSProcessInfo.processInfo;
+        fprintf(stderr, "[fps-link] max=%d callbacks=%.2f target=%.2f lowPower=%d thermal=%d\n",
+                (int)self.window.screen.maximumFramesPerSecond, _sampleTicks / elapsed,
+                interval > 0 ? 1 / interval : 0, device.lowPowerModeEnabled, (int)device.thermalState);
+        _sampleStart = link.timestamp;
+        _sampleTicks = 0;
+    }
     // Show the controls when a match starts and give the pointer back when it ends.
     if (++_frame % 6 == 0 && _arena && *_arena) [self followGame:*_arena];
     if (!_play || _editing) return;

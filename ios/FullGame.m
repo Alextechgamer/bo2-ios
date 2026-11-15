@@ -83,6 +83,8 @@ static void QueueConnect(void *handle, void (*queue)(const char *), NSString *co
 }
 
 static void ConfigureRuntime(NSString *mode) {
+    // The render worker sleeps after each pump, in addition to drawable wait and encoding.
+    if (UIScreen.mainScreen.maximumFramesPerSecond > 60) setenv("BO2_PUMP_US", "1000", 1);
     // Keep the upstream play_steam.sh execution settings. The desktop launcher
     // also enables named input pipes; UIKit sends events directly to the queue.
     NSDictionary *settings = @{
@@ -288,7 +290,9 @@ static void EndRunLog(void) {
     [library addTarget:self action:@selector(steamLibrary) forControlEvents:UIControlEventTouchUpInside];
     UIButton *files = Chip(@"Game Files", @"arrow.down.circle.fill");
     [files addTarget:self action:@selector(steamInstall) forControlEvents:UIControlEventTouchUpInside];
-    UIStackView *tools = [[UIStackView alloc] initWithArrangedSubviews:@[join, library, files]];
+    UIButton *fpsLog = Chip(@"Share FPS log", @"square.and.arrow.up");
+    [fpsLog addTarget:self action:@selector(shareFPSLog:) forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *tools = [[UIStackView alloc] initWithArrangedSubviews:@[join, library, files, fpsLog]];
     tools.distribution = UIStackViewDistributionFillEqually;
     tools.spacing = 12;
 
@@ -319,6 +323,58 @@ static void EndRunLog(void) {
         name:@"BO2SteamLibraryPlay" object:nil];
     [self updateSteamAccount:nil];
     if (PreviousRunFailed()) _status.text = @"The last session ended unexpectedly. Its log was kept for review.";
+}
+- (void)shareFPSLog:(UIButton *)sender {
+    NSURL *file = RunFile(@"BO2-FPS.txt");
+    NSURL *raw = RunFile(@"last-run.log");
+    if (![raw checkResourceIsReachableAndReturnError:nil]) {
+        _status.text = @"Start a game first to record frame rates.";
+        return;
+    }
+    sender.enabled = NO;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        FILE *input = fopen(raw.fileSystemRepresentation, "r");
+        NSMutableString *report = [NSMutableString string];
+        char *line = NULL;
+        size_t capacity = 0;
+        while (input && getline(&line, &capacity, input) >= 0) {
+            double secs, ticks, target;
+            unsigned submitted, fresh, displayed, displayedFresh, dropped;
+            int hz, power, thermal;
+            char build[32], mode[8];
+            unsigned long long frame;
+            double interval, wait, encode, total;
+            if (sscanf(line, "[fps-session] build=%31[0-9.] mode=%7[a-z]", build, mode) == 2)
+                [report appendFormat:@"build=%s mode=%s\n", build, mode];
+            else if (sscanf(line, "[frame-ready] %llu %lf", &frame, &interval) == 2)
+                [report appendFormat:@"ready=%llu intervalMs=%.3f\n", frame, interval];
+            else if (sscanf(line, "[frame-submit] %llu %lf %lf %lf", &frame, &wait, &encode, &total) == 4)
+                [report appendFormat:@"submit=%llu pickupWaitMs=%.3f pickupToCommitMs=%.3f readyToCommitMs=%.3f\n",
+                    frame, wait, encode, total];
+            else if (sscanf(line, "[fps-link] max=%d callbacks=%lf target=%lf lowPower=%d thermal=%d",
+                            &hz, &ticks, &target, &power, &thermal) == 5)
+                [report appendFormat:@"screenMax=%d callbacksHz=%.1f targetHz=%.1f lowPower=%d thermal=%d\n",
+                    hz, ticks, target, power, thermal];
+            else if (sscanf(line, "[PRESENT] hote=%*f unix=%*f fen=%lfs soumis=%u soumis_neufs=%u affiches=%u affiches_neufs=%u non_affiches=%u",
+                            &secs, &submitted, &fresh, &displayed, &displayedFresh, &dropped) == 6 && secs > 0)
+                [report appendFormat:@"window=%.3fs submittedFPS=%.1f freshSubmittedFPS=%.1f displayedFPS=%.1f freshDisplayedFPS=%.1f dropped=%u\n",
+                    secs, submitted/secs, fresh/secs, displayed/secs, displayedFresh/secs, dropped];
+        }
+        free(line);
+        if (input) fclose(input);
+        BOOL ok = report.length && [report writeToURL:file atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            sender.enabled = YES;
+            if (!ok) { self->_status.text = @"No frame measurements found in the last run."; return; }
+            [self presentFPSLog:file sender:sender];
+        });
+    });
+}
+- (void)presentFPSLog:(NSURL *)file sender:(UIButton *)sender {
+    UIActivityViewController *share = [[UIActivityViewController alloc] initWithActivityItems:@[file] applicationActivities:nil];
+    share.popoverPresentationController.sourceView = sender;
+    share.popoverPresentationController.sourceRect = sender.bounds;
+    [self presentViewController:share animated:YES completion:nil];
 }
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
@@ -628,6 +684,8 @@ static void EndRunLog(void) {
     if (_steamLaunch.personaName.length) setenv("BO2_NAME",_steamLaunch.personaName.UTF8String,1);
     if (_steamLaunch) setenv("BO2_DW_TRACE","0",1);   // keep network payloads out of the saved log
     BeginRunLog();
+    fprintf(stderr, "[fps-session] build=%s mode=%s\n",
+            [[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] UTF8String], mode.UTF8String);
     LogDeviceState();
     for (NSNotificationName name in @[NSProcessInfoThermalStateDidChangeNotification,
             NSProcessInfoPowerStateDidChangeNotification, UIScreenCapturedDidChangeNotification])

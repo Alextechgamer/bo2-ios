@@ -5,6 +5,7 @@
 !/THIRD-PARTY-NOTICES.md
 !/docs/
 !/docs/INSTALL.md
+!/docs/FPS.md
 !/docs/PRIVATE-SERVERS.md
 !/docs/assets/
 !/docs/assets/*.jpg
@@ -47,6 +48,7 @@
 !/ios/package_game.py
 !/ios/plutonium_sections.py
 !/ios/runtime.patch
+!/ios/frame-timing.patch
 !/ios/setup.sh
 !/ios/runtime_catalog.py
 !/ios/steam_install_server.py
