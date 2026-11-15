@@ -5,6 +5,8 @@
 | 2611131501 | Multiplayer | 256.944 s | 128 | 102 | 98.4 | 1 |
 | 2611141901 | Multiplayer | 377.318 s | 188 | 87 | 108.2 | 1 |
 | 2611142101 | Multiplayer | 449.405 s | 224 | 187 | 118.5 | 1 |
+| 2611142201 | Multiplayer | 206.717 s | 103 | 76 | 119.5 | 1 |
+| 2611142201 | Zombies | 128.557 s | 63 | 36 | 62.4 | 2 |
 
 Fresh FPS counts newly produced frames that Metal reported displaying. Peak is the highest sample average. The export includes menus, loading, and matches without labeling them. The phone reported a 120 Hz target and Low Power Mode off. Thermal state stayed nominal in the first two runs and ranged from nominal to fair in the third.
 
@@ -31,5 +33,9 @@ The multiplayer executable reads `com_maxfps` and a second runtime limit at `0x6
 Build 2611142201 adds one pacing row per multiplayer engine-loop iteration. `limiterWaitMs` sums the monotonic elapsed time inside that iteration's wait calls. `pickedFPS` is the signed value after the engine selects between the two limits. Zero waits produce a zero-duration row. `lastReady` identifies the most recent ready event observed by the exporter, which can belong to a different engine iteration.
 
 For this diagnostic build, disassemble the supported MP `batch_0.bc` with LLVM 17, run `python3 ios/instrument_mp_limiter.py original.ll traced.ll`, and assemble the result as `batch_0.bc` in a separate input directory. Use that directory as `FOLD_SRC` and a fresh `FOLD_OUT` when running `fold_modes.sh` for MP slice 0. Link the resulting object alongside the MP input object built with the current `controller-friction.patch`.
+
+The 2611142201 multiplayer phone capture averaged 68.4 fresh FPS, with 13.502 ms median frame spacing. All 41,425 pacing rows reported a selected limit of zero. After ready frame 5,000, all 9,777 remaining pacing rows reported zero waits. In local practice, 50 of 1,707 changed stick samples were eligible for slowdown and 31 had different input and output values.
+
+The Zombies capture averaged 41.8 fresh FPS including the freeze. The final zone sound milestone was `en_so_zsurvival_zm_transit` at ready frame 5,147. Script progress reached frame 5,200 and production reached ready frame 5,382. Display callbacks continued while the final 14 reporting windows showed zero fresh FPS.
 
 Build 2611141901 also records a sequence number each time a nonempty game frame becomes ready. `intervalMs` measures elapsed time since the previous ready frame (−1 for the first). For each fresh frame submitted, `pickupWaitMs` measures ready-to-renderer pickup and `pickupToCommitMs` measures pickup to the start of Metal command-buffer commit. Their sum is `readyToCommitMs`. A ready frame superseded before pickup has no submit row. A 120 FPS cadence gives about 8.33 ms between new frames. CPU-side commit and GPU completion are separate events.

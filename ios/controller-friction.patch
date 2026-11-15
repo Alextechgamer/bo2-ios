@@ -19,7 +19,7 @@
  
  namespace {
  
-@@ -201,6 +206,44 @@
+@@ -201,6 +206,79 @@
      if (std::memcmp(&sample,&g_touch,sizeof sample)) { g_touch=sample; ++g_paquet; }
  }
  
@@ -36,9 +36,16 @@
 +
 +// The counters use guest frame-loop iterations, which can differ from rendered frames.
 +
-+// Steam t6mp: use the same local-player flags as the enemy-crosshair HUD.
-+// Read on the guest's input thread. The launcher enables this only for local practice.
-+static bool localEnemyCrosshair() {
++// The local HUD records the player it traced (0x4b2dd8), the trace time,
++// and friend/enemy flags. Follow that specific player briefly as it moves.
++static float guestFloat(uint32_t address) {
++    uint32_t bits = win32_mem_read32(address);
++    float result;
++    std::memcpy(&result, &bits, sizeof(result));
++    return result;
++}
++
++static bool pullRightStick(Gamepad& pad) {
 +    if (win32_mem_read32(0x10e9d88) != 10) return false;
 +    uint32_t server = win32_mem_read32(0x24849c8);
 +    if (!server || server > UINT32_MAX - 32 || win32_mem_read32(server + 0x10) != 1 ||
@@ -46,25 +53,53 @@
 +    uint32_t cg = win32_mem_read32(0x10616cc);
 +    if (!cg || cg > UINT32_MAX - 0x695d0) return false;
 +    uint32_t flags = win32_mem_read32(cg + 0x480b8);
-+    return (flags & 0x18) == 0x10 &&
-+           win32_mem_read32(cg + 0x4808c) - win32_mem_read32(cg + 0x695cc) < 150;
-+}
-+
-+static void slowRightStick(Gamepad& pad) {
-+    // Retain the XInput dead-zone boundary, the direction, and zero input.
-+    double radius = std::hypot(double(pad.rx), double(pad.ry));
-+    constexpr double deadZone = 8689;
-+    if (radius <= deadZone) return;
-+    double gain = (deadZone + (radius - deadZone) * 0.55) / radius;
-+    pad.rx = int16_t(std::lround(pad.rx * gain));
-+    pad.ry = int16_t(std::lround(pad.ry * gain));
++    uint32_t age = win32_mem_read32(cg + 0x4808c) - win32_mem_read32(cg + 0x695cc);
++    uint32_t id = win32_mem_read32(cg + 0x695c8);
++    static uint32_t confirmed = UINT32_MAX, traceTime = 0, lastCg = 0;
++    uint32_t now = win32_mem_read32(cg + 0x4808c);
++    if (lastCg != cg || (flags & 8) || age > 320) confirmed = UINT32_MAX;
++    lastCg = cg;
++    if ((flags & 0x18) == 0x10 && age < 150 && id < 18) {
++        confirmed = id;
++        traceTime = now - age;
++    }
++    if (id >= 18 || id != confirmed || now - traceTime > 320 || (flags & 8)) return false;
++    uint32_t entities = win32_mem_read32(0x1062db8);
++    if (!entities || entities > UINT32_MAX - 18 * 0x380) return false;
++    uint32_t ent = entities + id * 0x380;
++    if ((win32_mem_read32(ent + 0x2b4) & 0xffff) != 1 ||
++        !(win32_mem_read32(ent + 0x378) & 2)) return false;
++    double delta[3], view[3] = {};
++    for (int i = 0; i < 3; ++i)
++        delta[i] = guestFloat(ent + 0x2c + 4*i) - guestFloat(cg + 0x4d8c4 + 4*i);
++    delta[2] += 42; // Standing upper torso.
++    for (int axis = 0; axis < 3; ++axis)
++        for (int i = 0; i < 3; ++i)
++            view[axis] += delta[i] * guestFloat(cg + 0x4d8d4 + 12*axis + 4*i);
++    if (!(view[0] > 1)) return false;
++    double x = -view[1] / view[0], y = view[2] / view[0];
++    double distance = std::hypot(x, y);
++    double hand = std::hypot(double(pad.rx), double(pad.ry));
++    if (!std::isfinite(distance) || distance > 0.18 || hand >= 26000) return false;
++    double gain = hand <= 8689 ? 1.0 : (8689 + (hand - 8689)*0.30) / hand;
++    double dx = 0, dy = 0;
++    if (distance > 0.005) {
++        double pull = (9400 + 9500 * std::fmin(distance / 0.08, 1.0)) *
++                      std::fmin((26000 - hand) / 9000, 1.0);
++        dx = x * pull / distance;
++        dy = y * pull / distance;
++    }
++    auto axisValue = [](double v) { return int16_t(std::lround(std::fmax(-32768, std::fmin(32767, v)))); };
++    pad.rx = axisValue(pad.rx * gain + dx);
++    pad.ry = axisValue(pad.ry * gain + dy);
++    return true;
 +}
 +#endif
 +
  // XInputGetState : 16 octets de XINPUT_STATE dans `out`. Rend ERROR_SUCCESS ou 0x48F.
  extern "C" uint32_t bo2_pad_etat(uint32_t idx, uint8_t out[16]) {
      initialiser();
-@@ -213,8 +256,32 @@
+@@ -213,8 +291,35 @@
                      g_branchee ? "branchee" : "absente");
      }
      if (idx != 0) return kNonBranchee;
@@ -72,15 +107,18 @@
 +#if defined(BO2_TARGET_MPS)
 +    static const bool practice = bo2_env_on("BO2_LOCAL_PAD_FRICTION");
 +    static bool wasActive = false;
++    int rawX = combined.rx, rawY = combined.ry;
 +    bool active = practice && g_ctl && !g_script_actif && combined.lt > 30 &&
-+                  !g_touch.rx && !g_touch.ry && localEnemyCrosshair();
++                  !g_touch.rx && !g_touch.ry && pullRightStick(combined);
 +    if (active != wasActive) {
 +        ++g_paquet;
 +        fprintf(stderr, "[pad-friction] active=%d\n", active);
 +        wasActive = active;
 +    }
-+    int rawX = combined.rx, rawY = combined.ry;
-+    if (active) slowRightStick(combined);
++    static int lastOutX = 0, lastOutY = 0;
++    if (combined.rx != lastOutX || combined.ry != lastOutY) ++g_paquet;
++    lastOutX = combined.rx;
++    lastOutY = combined.ry;
 +    if (practice && g_ctl && !g_script_actif) {
 +        static int previous[] = {65536, 65536, 65536, 65536, -1, -1};
 +        int sample[] = {rawX, rawY, combined.rx, combined.ry, active, combined.lt};
