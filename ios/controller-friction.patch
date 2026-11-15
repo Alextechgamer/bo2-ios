@@ -1,14 +1,15 @@
 --- a/runtime/input/pad_gc.mm
 +++ b/runtime/input/pad_gc.mm
-@@ -22,6 +22,7 @@
+@@ -22,6 +22,8 @@
  #import <Foundation/Foundation.h>
  #import <GameController/GameController.h>
  #include <chrono>
++#include <atomic>
 +#include <cmath>
  #include <cstdint>
  #include <cstdio>
  #include <cstdlib>
-@@ -32,6 +33,10 @@
+@@ -32,6 +34,10 @@
  #include "../win32/bo2_getenv.h"
  
  extern "C" void bo2_cmd_queue(const char* cmd);   // win32_runtime.cpp : file des commandes console
@@ -19,7 +20,7 @@
  
  namespace {
  
-@@ -201,6 +206,79 @@
+@@ -201,6 +207,91 @@
      if (std::memcmp(&sample,&g_touch,sizeof sample)) { g_touch=sample; ++g_paquet; }
  }
  
@@ -45,11 +46,20 @@
 +    return result;
 +}
 +
-+static bool pullRightStick(Gamepad& pad) {
++static std::atomic<bool> localController{false};
++extern "C" uint8_t bo2_local_lockon(uint8_t original) {
++    return localController.load(std::memory_order_relaxed) ? 1 : original;
++}
++
++static bool localMatch() {
 +    if (win32_mem_read32(0x10e9d88) != 10) return false;
 +    uint32_t server = win32_mem_read32(0x24849c8);
 +    if (!server || server > UINT32_MAX - 32 || win32_mem_read32(server + 0x10) != 1 ||
 +        !(win32_mem_read32(server + 0x18) & 0xff)) return false;
++    return true;
++}
++
++static bool pullRightStick(Gamepad& pad) {
 +    uint32_t cg = win32_mem_read32(0x10616cc);
 +    if (!cg || cg > UINT32_MAX - 0x695d0) return false;
 +    uint32_t flags = win32_mem_read32(cg + 0x480b8);
@@ -57,13 +67,13 @@
 +    uint32_t id = win32_mem_read32(cg + 0x695c8);
 +    static uint32_t confirmed = UINT32_MAX, traceTime = 0, lastCg = 0;
 +    uint32_t now = win32_mem_read32(cg + 0x4808c);
-+    if (lastCg != cg || (flags & 8) || age > 320) confirmed = UINT32_MAX;
++    if (lastCg != cg || (flags & 8) || age > 400) confirmed = UINT32_MAX;
 +    lastCg = cg;
 +    if ((flags & 0x18) == 0x10 && age < 150 && id < 18) {
 +        confirmed = id;
 +        traceTime = now - age;
 +    }
-+    if (id >= 18 || id != confirmed || now - traceTime > 320 || (flags & 8)) return false;
++    if (id >= 18 || id != confirmed || now - traceTime > 400 || (flags & 8)) return false;
 +    uint32_t entities = win32_mem_read32(0x1062db8);
 +    if (!entities || entities > UINT32_MAX - 18 * 0x380) return false;
 +    uint32_t ent = entities + id * 0x380;
@@ -80,12 +90,15 @@
 +    double x = -view[1] / view[0], y = view[2] / view[0];
 +    double distance = std::hypot(x, y);
 +    double hand = std::hypot(double(pad.rx), double(pad.ry));
-+    if (!std::isfinite(distance) || distance > 0.18 || hand >= 26000) return false;
++    if (!std::isfinite(distance) || distance > 0.19 || hand >= 32767) return false;
 +    double gain = hand <= 8689 ? 1.0 : (8689 + (hand - 8689)*0.30) / hand;
++    // Ease back to unmodified input as the player deliberately turns away.
++    double blend = std::fmin(1.0, (32767 - hand) / 8000.);
++    gain = 1.0 + (gain - 1.0) * blend;
 +    double dx = 0, dy = 0;
 +    if (distance > 0.005) {
-+        double pull = (9400 + 9500 * std::fmin(distance / 0.08, 1.0)) *
-+                      std::fmin((26000 - hand) / 9000, 1.0);
++        double pull = (9800 + 9800 * std::fmin(distance / 0.08, 1.0)) *
++                      blend * (pad.lt > 30 ? 1.0 : 0.72);
 +        dx = x * pull / distance;
 +        dy = y * pull / distance;
 +    }
@@ -99,7 +112,7 @@
  // XInputGetState : 16 octets de XINPUT_STATE dans `out`. Rend ERROR_SUCCESS ou 0x48F.
  extern "C" uint32_t bo2_pad_etat(uint32_t idx, uint8_t out[16]) {
      initialiser();
-@@ -213,8 +291,35 @@
+@@ -213,8 +304,38 @@
                      g_branchee ? "branchee" : "absente");
      }
      if (idx != 0) return kNonBranchee;
@@ -108,8 +121,11 @@
 +    static const bool practice = bo2_env_on("BO2_LOCAL_PAD_FRICTION");
 +    static bool wasActive = false;
 +    int rawX = combined.rx, rawY = combined.ry;
-+    bool active = practice && g_ctl && !g_script_actif && combined.lt > 30 &&
-+                  !g_touch.rx && !g_touch.ry && pullRightStick(combined);
++    bool physical = practice && g_ctl && !g_script_actif && !g_touch.rx && !g_touch.ry && localMatch();
++    localController.store(physical, std::memory_order_relaxed);
++    bool steering = std::hypot(double(rawX), double(rawY)) > 8689 ||
++                    std::hypot(double(combined.lx), double(combined.ly)) > 7849;
++    bool active = physical && (combined.lt > 30 || steering) && pullRightStick(combined);
 +    if (active != wasActive) {
 +        ++g_paquet;
 +        fprintf(stderr, "[pad-friction] active=%d\n", active);
