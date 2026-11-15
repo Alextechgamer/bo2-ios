@@ -250,7 +250,6 @@ static void EndRunLog(void) {
     UIButton *_steamAccount;
     BO2SteamLaunch *_steamLaunch;
     BOOL _onlineRequested;
-    BOOL _localControllerAssist;
     BOOL _started;
     BOOL _checking;
     NSString *_server;
@@ -531,7 +530,6 @@ static void EndRunLog(void) {
     if (_checking) return;
     _server=nil;
     NSString *mode = sender.accessibilityIdentifier;
-    _localControllerAssist = NO;
     if ([mode isEqualToString:@"mps"] || [mode isEqualToString:@"zms"]) {
         UIAlertController *menu=[UIAlertController alertControllerWithTitle:Modes()[mode] message:nil preferredStyle:UIAlertControllerStyleAlert];
         [menu addAction:[UIAlertAction actionWithTitle:@"Play Online with Steam" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -540,11 +538,6 @@ static void EndRunLog(void) {
         [menu addAction:[UIAlertAction actionWithTitle:@"Play Local" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
             [self startLocal:mode];
         }]];
-        if ([mode isEqualToString:@"mps"])
-            [menu addAction:[UIAlertAction actionWithTitle:@"Play Local with Controller Assist" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-                self->_localControllerAssist = YES;
-                [self startLocal:mode];
-            }]];
         [menu addAction:[UIAlertAction actionWithTitle:@"Cancel" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:menu animated:YES completion:nil];
         return;
@@ -670,8 +663,8 @@ static void EndRunLog(void) {
     if (![sections checkResourceIsReachableAndReturnError:&error]) { _status.text = error.localizedDescription; return; }
     setenv("BO2_GAME_DIR",game.fileSystemRepresentation,1);
     ConfigureRuntime(mode);
-    BOOL assist = _localControllerAssist && !_onlineRequested && !_server && [mode isEqualToString:@"mps"];
-    setenv("BO2_LOCAL_PAD_FRICTION", assist ? "1" : "0", 1);
+    BOOL assist = !_server && ([mode isEqualToString:@"mps"] || [mode isEqualToString:@"zms"]);
+    setenv("BO2_CONTROLLER_ASSIST", assist ? "1" : "0", 1);
     if (setenv("BO2_DW_TRANSPORT","local",1)) { _status.text=@"Could not configure game networking."; return; }
     if (chdir(game.fileSystemRepresentation)) { _status.text=@"Could not open the game directory."; return; }
     NSURL *library = [NSBundle.mainBundle.privateFrameworksURL URLByAppendingPathComponent:

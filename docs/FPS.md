@@ -9,6 +9,7 @@
 | 2611142201 | Zombies | 128.557 s | 63 | 36 | 62.4 | 2 |
 | 2611142301 | Multiplayer | 387.165 s | 193 | 149 | 115.0 | 1 |
 | 2611150001 | Multiplayer | 353.054 s | 176 | 137 | 119.5 | 1 |
+| 2611150101 | Multiplayer | 329.379 s | 164 | 41 | 75.8 | 1 |
 
 Fresh FPS counts newly produced frames that Metal reported displaying. Peak is the highest sample average. The export includes menus, loading, and matches without labeling them. The phone reported a 120 Hz target and Low Power Mode off. Thermal state stayed nominal in the first two runs and ranged from nominal to fair in the third.
 
@@ -43,5 +44,7 @@ The Zombies capture averaged 41.8 fresh FPS including the freeze. The final zone
 The 2611142301 multiplayer capture had 4,622 changed stick samples. Assist was active in 1,539. The left trigger was below the ADS threshold in 2,155, and right-stick magnitude met the previous breakaway threshold in 1,720. These groups overlap. The export did not record the movement stick.
 
 Build 2611150001 also uses the original MP lock-on routine in local physical-controller practice. For the release build, apply `ios/enable_mp_lockon.py` to the LLVM 17 disassembly of MP slice 46 before assembling and folding that slice, following the slice 0 procedure above. Link both instrumented slices with the updated MP input object. The stock lock-on getter remains effective outside local controller practice.
+
+In the 2611150101 phone run, all 163 sampled target distances came from the enemy crosshair trace. Build 2611150201 enables controller assist through the normal local and Steam online launch paths in both Multiplayer and Zombies. To reproduce the Zombies framework, apply `enable_mp_lockon.py original.ll traced.ll zms` to Zombies slice 41 before folding, and compile the input object with `BO2_TARGET_ZMS`. Zombies uses its own client state, entity table, lock-on routine, and actor IDs. Both modes check the game's script-controlled assist setting and require a physical gamepad.
 
 Build 2611141901 also records a sequence number each time a nonempty game frame becomes ready. `intervalMs` measures elapsed time since the previous ready frame (−1 for the first). For each fresh frame submitted, `pickupWaitMs` measures ready-to-renderer pickup and `pickupToCommitMs` measures pickup to the start of Metal command-buffer commit. Their sum is `readyToCommitMs`. A ready frame superseded before pickup has no submit row. A 120 FPS cadence gives about 8.33 ms between new frames. CPU-side commit and GPU completion are separate events.
