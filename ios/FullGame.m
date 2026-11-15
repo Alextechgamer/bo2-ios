@@ -338,6 +338,8 @@ static void EndRunLog(void) {
         NSMutableString *report = [NSMutableString string];
         char *line = NULL;
         size_t capacity = 0;
+        BOOL zombies = NO;
+        unsigned long long lastReady = 0;
         while (input && getline(&line, &capacity, input) >= 0) {
             double secs, ticks, target;
             unsigned submitted, fresh, displayed, displayedFresh, dropped;
@@ -345,10 +347,20 @@ static void EndRunLog(void) {
             char build[32], mode[8];
             unsigned long long frame;
             double interval, wait, encode, total;
-            if (sscanf(line, "[fps-session] build=%31[0-9.] mode=%7[a-z]", build, mode) == 2)
+            int userLimit, modeLimit, picked, calls, rx, ry, ox, oy, lt;
+            if (sscanf(line, "[fps-session] build=%31[0-9.] mode=%7[a-z]", build, mode) == 2) {
+                zombies = strcmp(mode, "zms") == 0;
+                lastReady = 0;
                 [report appendFormat:@"build=%s mode=%s\n", build, mode];
-            else if (sscanf(line, "[frame-ready] %llu %lf", &frame, &interval) == 2)
+            } else if (sscanf(line, "[frame-ready] %llu %lf", &frame, &interval) == 2) {
+                lastReady = frame;
                 [report appendFormat:@"ready=%llu intervalMs=%.3f\n", frame, interval];
+            } else if (sscanf(line, "[pace] %llu %d %d %d %d %lf", &frame, &userLimit, &modeLimit, &picked, &calls, &wait) == 6)
+                [report appendFormat:@"engineFrame=%llu comMaxFPS=%d modeLimit=%d pickedFPS=%d waitCalls=%d limiterWaitMs=%.3f lastReady=%llu\n",
+                    frame, userLimit, modeLimit, picked, calls, wait, lastReady];
+            else if (sscanf(line, "[stick] %llu %d %d %d %d %d %d", &frame, &rx, &ry, &ox, &oy, &friction, &lt) == 7)
+                [report appendFormat:@"stickTimeMs=%llu rawX=%d rawY=%d assistedX=%d assistedY=%d active=%d leftTrigger=%d lastReady=%llu\n",
+                    frame, rx, ry, ox, oy, friction, lt, lastReady];
             else if (sscanf(line, "[pad-friction] active=%d", &friction) == 1)
                 [report appendFormat:@"controllerAssistActive=%d\n", friction];
             else if (sscanf(line, "[frame-submit] %llu %lf %lf %lf", &frame, &wait, &encode, &total) == 4)
@@ -362,6 +374,26 @@ static void EndRunLog(void) {
                             &secs, &submitted, &fresh, &displayed, &displayedFresh, &dropped) == 6 && secs > 0)
                 [report appendFormat:@"window=%.3fs submittedFPS=%.1f freshSubmittedFPS=%.1f displayedFPS=%.1f freshDisplayedFPS=%.1f dropped=%u\n",
                     secs, submitted/secs, fresh/secs, displayed/secs, displayedFresh/secs, dropped];
+            else if (zombies) {
+                // Export only known engine events and bounded asset identifiers.
+                const char *events[] = {"Adding fastfile '", "Loading fastfile '", "Loading sounds for '", "Loaded sounds for '"};
+                const char *labels[] = {"queued", "loading", "sound-start", "sound-finished"};
+                const char prefix[] = "[OutputDebugString] ";
+                const char *msg = strncmp(line, prefix, sizeof(prefix)-1) == 0 ? line + sizeof(prefix)-1 : line;
+                for (unsigned i=0; i<4; ++i) {
+                    size_t len = strlen(events[i]);
+                    if (strncmp(msg, events[i], len)) continue;
+                    const char *name = msg + len;
+                    size_t n = strspn(name, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-");
+                    if (n && n <= 96 && name[n] == '\'')
+                        [report appendFormat:@"zmStage=%s zone=%.*s lastReady=%llu\n", labels[i], (int)n, name, lastReady];
+                    break;
+                }
+                if (strstr(msg, "server script runtime error") || strstr(msg, "Terminal script error"))
+                    [report appendFormat:@"zmStage=script-error lastReady=%llu\n", lastReady];
+                if (sscanf(msg, "[GSC-RATE] frame=%llu", &frame) == 1)
+                    [report appendFormat:@"zmScriptFrame=%llu lastReady=%llu\n", frame, lastReady];
+            }
         }
         free(line);
         if (input) fclose(input);

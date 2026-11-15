@@ -43,6 +43,7 @@
 !/ios/dw_online.cpp
 !/ios/dw_online.h
 !/ios/fold_modes.sh
+!/ios/instrument_mp_limiter.py
 !/ios/index_library.py
 !/ios/link_mode.py
 !/ios/package_game.py

@@ -19,11 +19,23 @@
  
  namespace {
  
-@@ -201,6 +206,32 @@
+@@ -201,6 +206,44 @@
      if (std::memcmp(&sample,&g_touch,sizeof sample)) { g_touch=sample; ++g_paquet; }
  }
  
 +#if defined(BO2_TARGET_MPS)
++extern "C" uint64_t bo2_pace_clock() {
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++extern "C" void bo2_pace_report(int user, int mode, int picked, int calls, uint64_t ns) {
++    static uint64_t frame = 0;
++    fprintf(stderr, "[pace] %llu %d %d %d %d %.3f\n",
++            (unsigned long long)++frame, user, mode, picked, calls, double(ns) / 1000000.);
++}
++
++// The counters use guest frame-loop iterations, which can differ from rendered frames.
++
 +// Steam t6mp: use the same local-player flags as the enemy-crosshair HUD.
 +// Read on the guest's input thread. The launcher enables this only for local practice.
 +static bool localEnemyCrosshair() {
@@ -52,7 +64,7 @@
  // XInputGetState : 16 octets de XINPUT_STATE dans `out`. Rend ERROR_SUCCESS ou 0x48F.
  extern "C" uint32_t bo2_pad_etat(uint32_t idx, uint8_t out[16]) {
      initialiser();
-@@ -213,8 +244,20 @@
+@@ -213,8 +256,32 @@
                      g_branchee ? "branchee" : "absente");
      }
      if (idx != 0) return kNonBranchee;
@@ -67,7 +79,19 @@
 +        fprintf(stderr, "[pad-friction] active=%d\n", active);
 +        wasActive = active;
 +    }
++    int rawX = combined.rx, rawY = combined.ry;
 +    if (active) slowRightStick(combined);
++    if (practice && g_ctl && !g_script_actif) {
++        static int previous[] = {65536, 65536, 65536, 65536, -1, -1};
++        int sample[] = {rawX, rawY, combined.rx, combined.ry, active, combined.lt};
++        if (std::memcmp(previous, sample, sizeof sample)) {
++            fprintf(stderr, "[stick] %llu %d %d %d %d %d %d\n",
++                    (unsigned long long)(bo2_pace_clock() / 1000000),
++                    rawX, rawY, combined.rx, combined.ry, active, combined.lt);
++            std::memcpy(previous, sample, sizeof sample);
++        }
++    }
++
 +#endif
      std::memcpy(out, &g_paquet, 4);
 -    Gamepad combined = g_etat;
