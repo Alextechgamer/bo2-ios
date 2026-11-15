@@ -8,6 +8,7 @@
 | 2611142201 | Multiplayer | 206.717 s | 103 | 76 | 119.5 | 1 |
 | 2611142201 | Zombies | 128.557 s | 63 | 36 | 62.4 | 2 |
 | 2611142301 | Multiplayer | 387.165 s | 193 | 149 | 115.0 | 1 |
+| 2611150001 | Multiplayer | 353.054 s | 176 | 137 | 119.5 | 1 |
 
 Fresh FPS counts newly produced frames that Metal reported displaying. Peak is the highest sample average. The export includes menus, loading, and matches without labeling them. The phone reported a 120 Hz target and Low Power Mode off. Thermal state stayed nominal in the first two runs and ranged from nominal to fair in the third.
 

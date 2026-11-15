@@ -358,6 +358,9 @@ static void EndRunLog(void) {
             } else if (sscanf(line, "[pace] %llu %d %d %d %d %lf", &frame, &userLimit, &modeLimit, &picked, &calls, &wait) == 6)
                 [report appendFormat:@"engineFrame=%llu comMaxFPS=%d modeLimit=%d pickedFPS=%d waitCalls=%d limiterWaitMs=%.3f lastReady=%llu\n",
                     frame, userLimit, modeLimit, picked, calls, wait, lastReady];
+            else if (sscanf(line, "[assist-range] %llu %d %lf %lf", &frame, &friction, &wait, &interval) == 4)
+                [report appendFormat:@"assistTimeMs=%llu targetSource=%@ forwardUnits=%.1f angularOffsetRatio=%.5f lastReady=%llu\n",
+                    frame, friction ? @"native" : @"crosshair", wait, interval, lastReady];
             else if (sscanf(line, "[stick] %llu %d %d %d %d %d %d", &frame, &rx, &ry, &ox, &oy, &friction, &lt) == 7)
                 [report appendFormat:@"stickTimeMs=%llu rawX=%d rawY=%d assistedX=%d assistedY=%d active=%d leftTrigger=%d lastReady=%llu\n",
                     frame, rx, ry, ox, oy, friction, lt, lastReady];
