@@ -2,6 +2,86 @@
 
 This guide is for someone setting the port up on their own iPhone. It covers what you need, how to build and install the app, and how to play.
 
+## Quick start
+
+This is the shortest path: an app without the game files inside, which downloads them from Steam on the phone. Every command is run in Terminal on the Mac. The sections after this one explain each part and the other options.
+
+**1. Install the build tools.** Install Xcode from the App Store and open it once so it installs the iPhone platform. Install [Homebrew](https://brew.sh), then:
+
+```sh
+brew install xcodegen cmake python@3.12
+```
+
+**2. Install bo2-mac's app, version `v0.2.0-test.4`.** Follow [bo2-mac's README](https://github.com/adrbn/bo2-mac#install) so that `Black Ops II.app` is in `/Applications`. This build uses the translation tools inside that app. Check that they are there:
+
+```sh
+ls "/Applications/Black Ops II.app/Contents/Resources/toolchain/llvm@17"
+```
+
+**3. Put your three unpacked executables in place.** The build reads these three files, made from your own Steam copy:
+
+```
+~/.bo2-native/steam/t6sp.exe.unpacked.exe
+~/.bo2-native/steam/t6mp.exe.unpacked.exe
+~/.bo2-native/steam/t6zm.exe.unpacked.exe
+```
+
+[bo2-mac's README](https://github.com/adrbn/bo2-mac#install) says what they are. Neither project provides a tool to make them. Each file is checked by SHA-256, so a wrong file is refused straight away. Never share them.
+
+**4. Get this repository.**
+
+```sh
+git clone https://github.com/Alextechgamer/bo2-ios-source.git
+```
+
+```sh
+cd bo2-ios-source
+```
+
+**5. Check that everything is in place.** `~/bo2-ios-build` is the folder the build works in; any folder on a disk with 30 GB free will do. The check takes a few seconds and names the first thing that is missing.
+
+```sh
+ios/setup.sh ~/bo2-ios-build check
+```
+
+**6. Build.** Replace `com.yourname.bo2` with a bundle identifier of your own.
+
+```sh
+BUNDLE_ID=com.yourname.bo2 ios/setup.sh ~/bo2-ios-build
+```
+
+This translates the game, compiles it and packages the app. It is a long build: plan for an hour or more, and leave the Mac awake and plugged in. If it stops, run the same command again and it carries on from where it was. When it ends it prints:
+
+```
+IPA: /Users/<you>/bo2-ios-build/out/BlackOpsII.ipa
+```
+
+**7. Sign and install the IPA.** The IPA from step 6 is unsigned. Either:
+
+- sign and install it with SideStore or a signing service, or
+- build it signed with your own Apple team instead, by adding `TEAM=<your team id>` in front of the command in step 6 (the team id is in Xcode → Settings → Accounts, or on your Apple Developer membership page), then drag the IPA onto your phone in Xcode → Window → Devices and Simulators.
+
+A free Apple ID works, but the app stops opening after 7 days and must be installed again.
+
+**8. On the phone.** Open the app, tap **Sign in to Steam**, then tap **Game Files** and let it download your game (well over 10 GB; stay on Wi-Fi and power). When it says **Game files installed**, pick a mode.
+
+Read [Before you play online](#before-you-play-online) first.
+
+### If the build stops
+
+The setup prints one line starting with `setup:` that says what went wrong.
+
+| Message | What to do |
+|---|---|
+| `xcodegen is not installed`, `cmake is not installed` | Run the `brew install` line in step 1. |
+| `Xcode with the iPhone SDK is not installed` | Open Xcode once and let it install the iOS platform, then run `sudo xcode-select -s /Applications/Xcode.app`. |
+| `bo2-mac's tools were not found` | Step 2. If the app is somewhere else, add `BO2MAC_APP="/path/to/Black Ops II.app"` in front of the command. |
+| `t6sp.exe.unpacked.exe is missing` (or `t6mp`, `t6zm`) | Step 3. If they are in another folder, add `BO2_INPUTS=/path/to/folder` in front of the command. |
+| `has N GB free; 30 is asked for` | Free some space, or use a work folder on another disk. |
+| `libvpx did not build`, `Unicorn did not build`, `did not link` | The message names a log file. Open it; the last lines say why. |
+| `some slices did not compile` | Run the same command again. If it repeats, the `.FAILED` files in the folder it names hold the compiler's messages. |
+| `set BUNDLE_ID for the package stage` | Add `BUNDLE_ID=com.yourname.bo2` in front of the command. |
+
 ## What you need
 
 | Item | Notes |
@@ -18,7 +98,9 @@ There is no ready-made IPA and there cannot be one: the app contains the game's 
 
 ## Build and install
 
-1. With the owning Steam account signed in on the Mac, create the ownership receipt:
+This is the fuller version of the quick start, with the optional ownership receipt. Here `$PRIVATE` is a private folder of your own outside this repository, `$WORK` is the build folder (`~/bo2-ios-build` in the quick start) and `$DEVICE_ID` is your phone's identifier from `xcrun devicectl list devices`.
+
+1. Optional. With the owning Steam account signed in to Steam on the Mac, create the ownership receipt. It lets local modes start without a Steam sign-in on the phone:
 
    ```sh
    python3 ios/steam_receipt.py "$PRIVATE/SteamOwnership.plist"
@@ -33,7 +115,7 @@ There is no ready-made IPA and there cannot be one: the app contains the game's 
    - **Signed with Xcode:** add `TEAM=<your team id>`. The IPA installs on devices registered to that team.
    - **Unsigned:** leave `TEAM` out, then sign `$WORK/out/BlackOpsII.ipa` with SideStore or a signing service.
    - **Game files inside the app:** add `GAME_ZIP=<zip of your game folder>`. The IPA is then about 16 GB, too large for most signing tools.
-   - **No receipt:** leave `RECEIPT` out and skip step 1. The app then holds no account, and every mode, local play included, starts on the Steam account signed in on the phone. Not yet run on a phone.
+   - **No receipt:** leave `RECEIPT` out and skip step 1. The app then holds no account, and every mode, local play included, starts on the Steam account signed in on the phone. This is the quick start's build; it was run on the test phone on November 11, 2026, signed with a signing service.
    - **Online play:** the Steam network transport is linked into Multiplayer and Zombies by default, and the launcher offers online play for both. `ONLINE=0` leaves it out.
    - **Private servers:** linked into Zombies by default. Multiplayer also needs `PLUTO_LUA_ZIP=<zip>`, your own capture of the nine interface scripts an r5369 server sends; without it Multiplayer is built without the private-server transport and the setup says so. `PRIVATE_SERVER=0` leaves it out of both.
    - **Game files downloaded afterwards:** without `GAME_ZIP` the app starts with no game files and says so. Sign in to Steam in the app and tap **Game Files**; see [Download the game files](#download-the-game-files). The private library installer in [PRIVATE-SERVERS.md](PRIVATE-SERVERS.md) is still there: pass its address as `LIBRARY_ORIGIN=<https origin>` and **Game Files** offers both.
@@ -70,6 +152,8 @@ On one Apple silicon Mac mini with Xcode 26, November 11, 2026:
 - The tools were bo2-mac's app at `218dc80`, the same commit the setup pins the source to. The finished build folder was about 10 GB; the peak during the build was not measured.
 
 Not checked: the Steam download itself (no manifest or file has been fetched with it yet; the download code is iDeck's, adapted to this app's folders, and iDeck's offline test of it has not been ported), Zombies online with Steam, an online session or a private-server join with frameworks linked by the setup, the Hksc download and build in `deps` (the link used a copy built earlier from the same commit), the signed (`TEAM`) and `GAME_ZIP` paths of the packager since they were changed, a full run for all three modes from nothing, a run on a second Mac, the unsigned IPA after SideStore or a signing service has signed it, and the result on a phone.
+
+Since then, on the test phone (owner's report, November 11, 2026): the unsigned IPA without a receipt was signed with a signing service and installed, Steam sign-in worked, **Game Files** downloaded the game, and online Multiplayer was played. This supersedes the entries above for the Steam download, the re-signed unsigned IPA and the result on a phone.
 
 Installing over an existing copy keeps its game data and saves. Deleting the app removes them.
 

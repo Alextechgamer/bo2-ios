@@ -156,20 +156,35 @@ the phone. A hardware controller works at the same time.
 
 ## Install
 
-The full walk-through is in [docs/INSTALL.md](docs/INSTALL.md). In short, on an Apple silicon Mac with Xcode,
-XcodeGen, CMake, [bo2-mac](https://github.com/adrbn/bo2-mac)'s app and your three unpacked executables:
+**Start with the [quick start in docs/INSTALL.md](docs/INSTALL.md#quick-start)**: eight numbered steps from an empty
+Mac to the game on your phone, with what to do when a step fails.
+
+You need an Apple silicon Mac with Xcode, a Steam account that owns the game, [bo2-mac](https://github.com/adrbn/bo2-mac)'s
+app (`v0.2.0-test.4`) and your three unpacked executables in `~/.bo2-native/steam/`. Then:
 
 ```sh
-python3 ios/steam_receipt.py "$PRIVATE/SteamOwnership.plist"
+brew install xcodegen cmake python@3.12
 ```
 
 ```sh
-RECEIPT="$PRIVATE/SteamOwnership.plist" BUNDLE_ID=com.example.bo2 ios/setup.sh "$WORK"
+git clone https://github.com/Alextechgamer/bo2-ios-source.git
 ```
 
-The setup translates your copy, builds the three frameworks and writes `$WORK/out/BlackOpsII.ipa`. It is a long build
-and resumes where it stopped. With `TEAM` set it signs with your Xcode team; without it the IPA is unsigned, for
-SideStore or a signing service. There is no ready-made IPA: the app contains the game's code, so each player builds
+```sh
+cd bo2-ios-source
+```
+
+```sh
+ios/setup.sh ~/bo2-ios-build check
+```
+
+```sh
+BUNDLE_ID=com.yourname.bo2 ios/setup.sh ~/bo2-ios-build
+```
+
+The setup translates your copy, builds the three frameworks and writes `~/bo2-ios-build/out/BlackOpsII.ipa`. It is a
+long build and resumes where it stopped. With `TEAM` set it signs with your Xcode team; without it the IPA is unsigned,
+for SideStore or a signing service. The app then downloads your game files from Steam on the phone (**Game Files**). There is no ready-made IPA: the app contains the game's code, so each player builds
 their own. The setup links online play into Multiplayer and Zombies and the private-server transport into Zombies;
 Multiplayer on private servers also needs your own capture of the server's interface scripts.
 
