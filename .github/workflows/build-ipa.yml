@@ -1,0 +1,125 @@
+# Builds your own unsigned IPA on one of GitHub's Apple silicon Macs, for people without a Mac.
+# Read docs/INSTALL.md, "Without a Mac", before using it. In short:
+#   - Run it only in a PRIVATE copy of this repository. In a public one, anyone could download the result.
+#   - Put your three unpacked executables on a release tagged "inputs" in that private copy.
+#   - Private repositories pay for macOS minutes beyond a small free amount.
+name: Build IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: Your own bundle identifier, for example com.yourname.bo2
+        required: true
+        default: com.example.bo2
+      preflight:
+        description: Only test the build machine (tools, source, libraries). Needs no game files.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  WORK: /Users/runner/bo2-ios-build
+  TOOLS: /Users/runner/bo2-mac-tools
+  BO2MAC_ZIP: https://github.com/adrbn/bo2-mac/releases/download/v0.2.0-test.4/bo2-mac.zip
+  BO2MAC_SHA256: 53c58797e61d2ed834d8642cd880c8114c384bbb3da7a55c3ac43c5885d4a584
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 355
+    steps:
+      - name: Refuse to build game code in a public repository
+        if: ${{ !inputs.preflight && !github.event.repository.private }}
+        run: |
+          echo "::error::This repository is public. A build here would let anyone download an app that contains your game's code."
+          echo "Import this repository into a new PRIVATE one (docs/INSTALL.md, 'Without a Mac') and run the workflow there."
+          exit 1
+
+      - uses: actions/checkout@v4
+
+      - name: Describe the build machine
+        run: |
+          sw_vers
+          echo "cores: $(sysctl -n hw.ncpu)  memory: $(( $(sysctl -n hw.memsize) / 1073741824 )) GB"
+          python3 --version
+          xcodebuild -version
+          df -g /Users/runner
+
+      - name: Free disk space
+        run: |
+          # Other Xcode versions, simulators and the Android tools are not used by this build.
+          current=$(cd "$(xcode-select -p)/../.." && pwd -P)
+          for app in /Applications/Xcode*.app; do
+            [ -e "$app" ] || continue
+            [ "$(cd "$app" && pwd -P)" = "$current" ] || sudo rm -rf "$app"
+          done
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes "$HOME/Library/Android" /Users/runner/hostedtoolcache/CodeQL || true
+          xcrun --sdk iphoneos --show-sdk-path
+          df -g /Users/runner
+
+      - name: Install build tools
+        run: brew install xcodegen cmake
+
+      - name: Fetch bo2-mac's translation tools
+        run: |
+          curl -sSL --fail -o "$RUNNER_TEMP/bo2-mac.zip" "$BO2MAC_ZIP"
+          echo "$BO2MAC_SHA256  $RUNNER_TEMP/bo2-mac.zip" | shasum -a 256 -c -
+          mkdir -p "$TOOLS"
+          ditto -x -k "$RUNNER_TEMP/bo2-mac.zip" "$TOOLS"
+          rm "$RUNNER_TEMP/bo2-mac.zip"
+          cat "$TOOLS/Black Ops II.app/Contents/Resources/version"
+          "$TOOLS/Black Ops II.app/Contents/Resources/toolchain/llvm@17/bin/clang" --version
+
+      - name: Fetch your executables from the "inputs" release
+        if: ${{ !inputs.preflight }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HOME/.bo2-native/steam"
+          gh release download inputs --repo "$GITHUB_REPOSITORY" --dir "$HOME/.bo2-native/steam" --pattern '*.unpacked.exe' || {
+            echo "::error::No release tagged 'inputs' with your three .unpacked.exe files was found in this repository."
+            exit 1
+          }
+          for exe in t6sp t6mp t6zm; do
+            [ -f "$HOME/.bo2-native/steam/$exe.exe.unpacked.exe" ] || { echo "::error::$exe.exe.unpacked.exe is missing from the 'inputs' release."; exit 1; }
+          done
+
+      - name: Build
+        env:
+          BO2MAC_APP: /Users/runner/bo2-mac-tools/Black Ops II.app
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          # The runner's disk is smaller than the 30 GB the setup asks for on a Mac; the free space is printed after each stage.
+          MIN_FREE_GB: 8
+        run: |
+          if [ "${{ inputs.preflight }}" = true ]; then stages="source deps"; else stages="check source deps convert fold link package"; fi
+          for stage in $stages; do
+            echo "::group::$stage"
+            ios/setup.sh "$WORK" "$stage"
+            df -g /Users/runner | tail -1
+            echo "::endgroup::"
+          done
+
+      - name: Upload the unsigned IPA
+        if: ${{ !inputs.preflight }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackOpsII-unsigned
+          path: ${{ env.WORK }}/out/BlackOpsII.ipa
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Upload the build logs after a failure
+        if: ${{ failure() && !inputs.preflight }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          retention-days: 1
+          path: |
+            ${{ env.WORK }}/link-*.log
+            ${{ env.WORK }}/deps/**/*.log
+            ${{ env.WORK }}/conversion/boot_cache/*/ios-lift.log
+            ${{ env.WORK }}/conversion/boot_cache/*/*.FAILED

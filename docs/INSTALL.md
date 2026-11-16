@@ -82,6 +82,29 @@ The setup prints one line starting with `setup:` that says what went wrong.
 | `some slices did not compile` | Run the same command again. If it repeats, the `.FAILED` files in the folder it names hold the compiler's messages. |
 | `set BUNDLE_ID for the package stage` | Add `BUNDLE_ID=com.yourname.bo2` in front of the command. |
 
+## Without a Mac
+
+**Not yet run.** This workflow has not been run on GitHub, in test mode or in full. Treat it as experimental.
+
+GitHub rents out Apple silicon Macs by the minute for automated builds. The workflow in [.github/workflows/build-ipa.yml](../.github/workflows/build-ipa.yml) runs the quick start's build on one of them and hands you the unsigned IPA, which you then sign and install from Windows or Linux.
+
+Know these three things before you start:
+
+- **It must be a private repository.** In a public repository, and a fork of this one is always public, other people can download what a build produces. That would publish an app containing your game's code. The workflow refuses to build in a public repository.
+- **It is probably not free.** GitHub gives a free personal account about $12 of build time a month for private repositories, and its Macs cost about $0.06 a minute, so roughly three hours. The build may take longer than that on GitHub's three-core Macs; it has not been timed. Past the free amount GitHub stops the build unless you have set a spending limit and a payment method.
+- **Your three executables go onto GitHub's servers**, in your own private repository. Delete them afterwards.
+
+Steps:
+
+1. On GitHub, choose **+** → **Import repository**, give it `https://github.com/Alextechgamer/bo2-ios` as the source, and set the new repository to **Private**. Do not use Fork.
+2. In your private repository, open **Releases** → **Draft a new release**. Type `inputs` as the tag, attach your three files (`t6sp.exe.unpacked.exe`, `t6mp.exe.unpacked.exe`, `t6zm.exe.unpacked.exe`) and publish it. The release is only visible to you because the repository is private.
+3. Open **Actions** → **Build IPA** → **Run workflow**. Enter a bundle identifier of your own and start it. To test the machine first without any game files, tick **preflight**; that takes a few minutes.
+4. When the run finishes, download **BlackOpsII-unsigned** from the run's page. It is kept for one day.
+5. Delete the `inputs` release and the downloaded artifact from the repository.
+6. Sign and install the IPA with SideStore, Sideloadly or a signing service, then carry on from step 8 of the quick start.
+
+If a build fails, the run's page says which stage stopped, and a **build-logs** download holds the detailed logs. A job is cut off after six hours.
+
 ## What you need
 
 | Item | Notes |

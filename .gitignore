@@ -1,6 +1,9 @@
 *
 !/.gitignore
 !/README.md
+!/.github/
+!/.github/workflows/
+!/.github/workflows/build-ipa.yml
 !/LICENSE
 !/THIRD-PARTY-NOTICES.md
 !/docs/
