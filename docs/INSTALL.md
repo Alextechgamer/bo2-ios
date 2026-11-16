@@ -28,6 +28,10 @@ ls "/Applications/Black Ops II.app/Contents/Resources/toolchain/llvm@17"
 ~/.bo2-native/steam/t6zm.exe.unpacked.exe
 ```
 
+These are not the files in your Steam folder. Steam wraps `t6sp.exe`, `t6mp.exe` and `t6zm.exe` in its copy protection, and the build refuses them as they are. It needs unpacked copies made from your own install. Each mode has its own executable, and Steam installs each mode separately from your library.
+
+**Only want some modes?** Supply only their executables and put `MODES` in front of the commands in steps 5 and 6. `MODES="mps zms"` builds an app with Multiplayer and Zombies only; `sps` is Campaign. The build is shorter and the app shows only those modes. A Multiplayer-and-Zombies build made this way on a Mac took 47 minutes and produced an app holding just those two; that app has not been run on a phone yet, and the GitHub workflow has not been run with fewer than three executables.
+
 [bo2-mac's README](https://github.com/adrbn/bo2-mac#install) says what they are. Neither project provides a tool to make them. Each file is checked by SHA-256, so a wrong file is refused straight away. Never share them.
 
 **4. Get this repository.**
@@ -78,7 +82,7 @@ The setup prints one line starting with `setup:` that says what went wrong.
 | `xcodegen is not installed`, `cmake is not installed` | Run the `brew install` line in step 1. |
 | `Xcode with the iPhone SDK is not installed` | Open Xcode once and let it install the iOS platform, then run `sudo xcode-select -s /Applications/Xcode.app`. |
 | `bo2-mac's tools were not found` | Step 2. If the app is somewhere else, add `BO2MAC_APP="/path/to/Black Ops II.app"` in front of the command. |
-| `t6sp.exe.unpacked.exe is missing` (or `t6mp`, `t6zm`) | Step 3. If they are in another folder, add `BO2_INPUTS=/path/to/folder` in front of the command. |
+| `t6sp.exe.unpacked.exe is missing` (or `t6mp`, `t6zm`) | Step 3. If they are in another folder, add `BO2_INPUTS=/path/to/folder` in front of the command. To build without that mode, set `MODES` as step 3 describes. |
 | `has N GB free; 30 is asked for` | Free some space, or use a work folder on another disk. |
 | `libvpx did not build`, `Unicorn did not build`, `did not link` | The message names a log file. Open it; the last lines say why. |
 | `some slices did not compile` | Run the same command again. If it repeats, the `.FAILED` files in the folder it names hold the compiler's messages. |
@@ -99,7 +103,7 @@ Know these three things before you start:
 Steps:
 
 1. On GitHub, choose **+** → **Import repository**, give it `https://github.com/Alextechgamer/bo2-ios` as the source, and set the new repository to **Private**. Do not use Fork.
-2. In your private repository, open **Releases** → **Draft a new release**. Type `inputs` as the tag, attach your three files (`t6sp.exe.unpacked.exe`, `t6mp.exe.unpacked.exe`, `t6zm.exe.unpacked.exe`) and publish it. The release is only visible to you because the repository is private.
+2. In your private repository, open **Releases** → **Draft a new release**. Type `inputs` as the tag, attach your unpacked executables (`t6sp.exe.unpacked.exe`, `t6mp.exe.unpacked.exe`, `t6zm.exe.unpacked.exe`) and publish it. The files straight from your Steam folder will not work; see step 3 of the quick start. With all three you get the full game. With fewer, the workflow builds an app with only those modes. The release is only visible to you because the repository is private.
 3. Open **Actions** → **Build IPA** → **Run workflow**. Enter a bundle identifier of your own and start it. To test the machine first without any game files, tick **preflight**; that takes a few minutes.
 4. When the run finishes, download **BlackOpsII-unsigned** from the run's page. It is kept for one day.
 5. Delete the `inputs` release and the downloaded artifact from the repository.

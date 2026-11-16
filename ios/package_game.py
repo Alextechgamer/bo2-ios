@@ -18,7 +18,8 @@ import tempfile
 from zipfile import ZipFile, ZIP_DEFLATED
 from runtime_catalog import write_catalog
 
-MODES = ("sps", "mps", "zms")
+ALL_MODES = ("sps", "mps", "zms")
+EXECUTABLES = {"sps": "t6sp.exe", "mps": "t6mp.exe", "zms": "t6zm.exe"}
 
 
 def command(*args):
@@ -26,10 +27,13 @@ def command(*args):
 
 
 def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin, lan_root, private_server,
-            unsigned=False, shell_only=False):
+            unsigned=False, shell_only=False, modes=ALL_MODES):
+    MODES = tuple(mode for mode in ALL_MODES if mode in modes)
+    if not MODES:
+        raise ValueError("No game mode to package")
     root, out, work = root.resolve(), out.resolve(), work.resolve()
     src = Path(__file__).resolve().parent
-    # Require all three linked game binaries and generated memory sections before packaging.
+    # Require the linked game binary and generated memory sections of every listed mode before packaging.
     mode_dirs = {mode: (lan_root if lan_root and mode in ("mps", "zms") else root/"device") / mode for mode in MODES}
     # A mode joins private servers when its link left the converted memory sections next to the framework.
     private = {mode: mode != "sps" and (bool(lan_root) or (mode_dirs[mode]/"pluto_pe_sections.bin").is_file()) for mode in MODES}
@@ -64,7 +68,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         stage=Path(folder)
         if game:
             names=set(game.namelist())
-            required={"t6sp.exe","t6mp.exe","t6zm.exe"}
+            required={EXECUTABLES[mode] for mode in MODES}
             if not required<=names or not any(n.startswith("zone/all/") for n in names):
                 raise ValueError("Game archive is missing required mode or zone files")
             for name in names:
@@ -132,7 +136,7 @@ def package(root, game_zip, out, team, work, bundle_id, receipt, library_origin,
         if shaders.is_file():
             shutil.copyfile(shaders, app/shaders.name)
         if game: game.extractall(app/"Game")
-        write_catalog(app, root)
+        write_catalog(app, root, MODES)
         if not unsigned:
             command("codesign","--force","--sign",identity,"--entitlements",ent,app)
             command("codesign","--verify","--deep","--strict",app)
@@ -162,8 +166,10 @@ if __name__=="__main__":
     p.add_argument("--receipt", type=Path, help="Your private Steam ownership plist; leave out for a build that holds no account")
     p.add_argument("--library-origin", help="HTTPS origin of your private installation service")
     p.add_argument("--lan-root", type=Path, help="Prebuilt LAN frameworks and sections in mps/ and zms/")
+    p.add_argument("--modes", nargs="+", choices=ALL_MODES, default=list(ALL_MODES),
+                   help="The modes to put in the app; each one listed must be linked")
     p.add_argument("--private-server", type=IPv4Address, help="Private IPv4 gateway preset for the Join menu and USB fallback")
     a=p.parse_args()
     if not a.unsigned and not a.team: p.error("--team is required unless --unsigned")
     package(a.root,a.game_zip,a.output,a.team,a.work,a.bundle_id,a.receipt,a.library_origin,a.lan_root,a.private_server,
-            a.unsigned,a.shell_only)
+            a.unsigned,a.shell_only,a.modes)

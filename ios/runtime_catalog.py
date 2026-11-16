@@ -15,7 +15,7 @@ def sha256(path):
         return digest.hexdigest()
 
 
-def generate(app, build_root):
+def generate(app, build_root, modes=None):
     app, build_root = Path(app), Path(build_root)
     # This private record must come from the verified unpacking/build process.
     # Its absence is deliberately not inferred from file names or file presence.
@@ -23,6 +23,8 @@ def generate(app, build_root):
     provenance = json.loads(provenance_path.read_text()) if provenance_path.is_file() else {}
     entries = []
     for app_id, mode, executable in MODES:
+        if modes is not None and mode not in modes:
+            continue
         framework = app / "Frameworks" / (mode + ".framework") / mode
         sections = app / "Modes" / mode / "pe_sections.bin"
         original = build_root / "mac-game" / executable
@@ -43,7 +45,7 @@ def generate(app, build_root):
     return dict(version=1, entries=entries)
 
 
-def write_catalog(app, build_root):
-    data = generate(app, build_root)
+def write_catalog(app, build_root, modes=None):
+    data = generate(app, build_root, modes)
     (Path(app) / "RuntimeCatalog.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return data

@@ -1,7 +1,8 @@
 # Builds your own unsigned IPA on one of GitHub's Apple silicon Macs, for people without a Mac.
 # Read docs/INSTALL.md, "Without a Mac", before using it. In short:
 #   - Run it only in a PRIVATE copy of this repository. In a public one, anyone could download the result.
-#   - Put your three unpacked executables on a release tagged "inputs" in that private copy.
+#   - Put your unpacked executables on a release tagged "inputs" in that private copy. All three build the full game;
+#     with fewer, the app has only the modes whose executables are there.
 #   - Private repositories pay for macOS minutes beyond a small free amount.
 name: Build IPA
 
@@ -81,12 +82,18 @@ jobs:
         run: |
           mkdir -p "$HOME/.bo2-native/steam"
           gh release download inputs --repo "$GITHUB_REPOSITORY" --dir "$HOME/.bo2-native/steam" --pattern '*.unpacked.exe' || {
-            echo "::error::No release tagged 'inputs' with your three .unpacked.exe files was found in this repository."
+            echo "::error::No release tagged 'inputs' with your .unpacked.exe files was found in this repository."
             exit 1
           }
-          for exe in t6sp t6mp t6zm; do
-            [ -f "$HOME/.bo2-native/steam/$exe.exe.unpacked.exe" ] || { echo "::error::$exe.exe.unpacked.exe is missing from the 'inputs' release."; exit 1; }
+          # Build the modes whose executables are in the release.
+          modes=""
+          for pair in sps:t6sp mps:t6mp zms:t6zm; do
+            if [ -f "$HOME/.bo2-native/steam/${pair#*:}.exe.unpacked.exe" ]; then modes="$modes ${pair%%:*}"
+            else echo "::warning::${pair#*:}.exe.unpacked.exe is not in the 'inputs' release; the app will be built without that mode."; fi
           done
+          [ -n "$modes" ] || { echo "::error::The 'inputs' release holds none of t6sp, t6mp or t6zm .exe.unpacked.exe."; exit 1; }
+          echo "Building:$modes"
+          echo "MODES=${modes# }" >> "$GITHUB_ENV"
 
       - name: Build
         env:

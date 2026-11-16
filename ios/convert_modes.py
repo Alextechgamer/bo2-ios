@@ -100,9 +100,14 @@ def codegen(src, mode, jobs, batches=True):
     build(units[-1])
 
 
-def convert(src, tc, inputs, selected, jobs, lift_only=False):
-    for _, exe, _, expected in MODES:
-        verify(inputs/(exe+".exe.unpacked.exe"), expected)
+def convert(src, tc, inputs, selected, jobs, lift_only=False, built=None):
+    # "built" is every mode this app will have; "selected" is what is still to convert in this run.
+    built = set(built or [m[0] for m in MODES])
+    if not set(selected) <= built:
+        raise ValueError("A mode to convert is not among the modes being built")
+    for mode, exe, _, expected in MODES:
+        if mode in built:
+            verify(inputs/(exe+".exe.unpacked.exe"), expected)
     boot = (src/"tools/boot.py").read_text()
     for _, exe, _, _ in MODES:
         name = exe+".exe.unpacked.exe"
@@ -123,13 +128,23 @@ def convert(src, tc, inputs, selected, jobs, lift_only=False):
     base = dict(os.environ, BO2_TOOLCHAIN=str(tc), LLVM17=str(tc/"llvm@17"),
                 PYTHONPATH=str(tc/"python"), REMILL_SEMANTICS_DIR=str(tc/"remill/build/lib/Arch/X86/Runtime"))
     for mode, exe, _, _ in MODES:
+        if mode not in built:
+            continue
         subprocess.run([sys.executable,"tools/ghidra_csv.py","remplir",str(inputs/(exe+".exe.unpacked.exe"))],
                        cwd=src, env=dict(base, BO2_TARGET=mode), check=True)
     tmp = src/"runtime/win32/snd_reverb_gen.ios.tmp"
     with tmp.open("w") as out:
-        for exe,start,end in (("t6mp","83b1a0","83bdc4"),("t6zm","83c170","83cd94"),("t6sp","806290","806eb4")):
-            subprocess.run([sys.executable,"scripts/x86c.py",str(inputs/(exe+".exe.unpacked.exe")),start,end,
-                            "bo2_snd_reverb_"+exe[2:],"SND-REV"],cwd=src,env=base,stdout=out,check=True)
+        for mode,exe,start,end in (("mps","t6mp","83b1a0","83bdc4"),("zms","t6zm","83c170","83cd94"),
+                                   ("sps","t6sp","806290","806eb4")):
+            if mode in built:
+                subprocess.run([sys.executable,"scripts/x86c.py",str(inputs/(exe+".exe.unpacked.exe")),start,end,
+                                "bo2_snd_reverb_"+exe[2:],"SND-REV"],cwd=src,env=base,stdout=out,check=True)
+            else:
+                # The shared runtime names all three routines. One for a mode that is not built is never called.
+                out.write(f'// {exe}.exe was not supplied; {mode} is not part of this build.\n'
+                          f'extern "C" __attribute__((used)) void* bo2_snd_reverb_{exe[2:]}(State* s, uint32_t pc, void* mem) {{\n'
+                          '    __builtin_trap();\n}\n')
+                out.flush()
     tmp.replace(src/"runtime/win32/snd_reverb_gen.inc")
     for mode, _, count, _ in MODES:
         if mode not in selected:
@@ -153,6 +168,8 @@ if __name__ == "__main__":
         parser.add_argument(arg,type=Path)
     parser.add_argument("--modes",nargs="+",choices=[m[0] for m in MODES],
                         default=[m[0] for m in MODES],help="Stages to run when resuming a partial conversion")
+    parser.add_argument("--built",nargs="+",choices=[m[0] for m in MODES],
+                        help="Every mode the app will have; the executables of the others are not needed")
     parser.add_argument("--codegen-only",choices=[m[0] for m in MODES],
                         help="Resume native compilation after an already completed lift")
     parser.add_argument("--lift-only",action="store_true",
@@ -162,4 +179,4 @@ if __name__ == "__main__":
     if a.codegen_only:
         codegen(a.source.resolve(),a.codegen_only,a.jobs)
     else:
-        convert(a.source.resolve(),a.toolchain.absolute(),a.inputs.resolve(),a.modes,a.jobs,a.lift_only)
+        convert(a.source.resolve(),a.toolchain.absolute(),a.inputs.resolve(),a.modes,a.jobs,a.lift_only,a.built)

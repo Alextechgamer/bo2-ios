@@ -11,8 +11,24 @@
 #include <ifaddrs.h>
 #include <sys/stat.h>
 
-static NSDictionary<NSString *,NSString *> *Modes(void) {
+static NSDictionary<NSString *,NSString *> *AllModes(void) {
     return @{@"sps":@"Campaign", @"mps":@"Multiplayer", @"zms":@"Zombies"};
+}
+
+// The modes this app was built with. A build made from fewer executables carries fewer of them.
+static NSDictionary<NSString *,NSString *> *Modes(void) {
+    static NSDictionary *built;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableDictionary *found = [NSMutableDictionary new];
+        [AllModes() enumerateKeysAndObjectsUsingBlock:^(NSString *mode, NSString *name, BOOL *stop) {
+            NSURL *sections = [NSBundle.mainBundle.resourceURL URLByAppendingPathComponent:
+                [NSString stringWithFormat:@"Modes/%@/pe_sections.bin", mode]];
+            if ([sections checkResourceIsReachableAndReturnError:nil]) found[mode] = name;
+        }];
+        built = found;
+    });
+    return built;
 }
 
 static NSDictionary *ServerInfo(const void *bytes, size_t length, NSString *nonce) {
@@ -277,6 +293,7 @@ static void EndRunLog(void) {
                              @"mps":@[@"Online with Steam or local", @"person.3.fill"],
                              @"zms":@[@"Online with Steam or solo", @"bolt.heart.fill"]};
     for (NSString *mode in @[@"sps",@"mps",@"zms"]) {
+        if (!Modes()[mode]) continue;
         UIButton *card = Card(Modes()[mode], detail[mode][0], detail[mode][1]);
         card.accessibilityIdentifier = mode;
         [card addTarget:self action:@selector(choose:) forControlEvents:UIControlEventTouchUpInside];
@@ -433,6 +450,12 @@ static void EndRunLog(void) {
         return;
     }
     NSString *requested = [NSUserDefaults.standardUserDefaults stringForKey:@"BO2RequestedMode"];
+    // The game can ask for a mode this app was built without.
+    if (AllModes()[requested ?: @""] && !Modes()[requested] && !_started) {
+        [NSUserDefaults.standardUserDefaults removeObjectForKey:@"BO2RequestedMode"];
+        _status.text = [NSString stringWithFormat:@"%@ is not part of this build.", AllModes()[requested]];
+        return;
+    }
     if (Modes()[requested ?: @""] && !_started) {
         [NSUserDefaults.standardUserDefaults removeObjectForKey:@"BO2RequestedMode"];
         [self start:requested];
@@ -450,6 +473,7 @@ static void EndRunLog(void) {
     UIAlertController *list = [UIAlertController alertControllerWithTitle:@"Join Private Server"
         message:nil preferredStyle:UIAlertControllerStyleAlert];
     for (NSString *mode in @[@"mps", @"zms"]) {
+        if (!Modes()[mode]) continue;
         NSString *title = [mode isEqualToString:@"mps"] ? @"Aftermath · Multiplayer" : @"TranZit · Zombies";
         [list addAction:[UIAlertAction actionWithTitle:title style:UIAlertActionStyleDefault handler:^(UIAlertAction *action){
             UIAlertController *edit = [UIAlertController alertControllerWithTitle:title

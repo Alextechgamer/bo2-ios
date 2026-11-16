@@ -22,7 +22,8 @@
 # Settings, as environment variables:
 #   BO2MAC_APP   default "/Applications/Black Ops II.app"
 #   BO2_INPUTS   default ~/.bo2-native/steam
-#   MODES        default "sps mps zms"
+#   MODES        default "sps mps zms" (Campaign, Multiplayer, Zombies). List fewer to build an app with only those;
+#                only their executables are then needed.
 #   JOBS         parallel compiles, default 3
 #   RECEIPT      your SteamOwnership.plist from ios/steam_receipt.py; without it every mode needs a Steam sign-in (package)
 #   BUNDLE_ID    your bundle identifier, for example com.example.bo2        (package)
@@ -57,6 +58,11 @@ if [ -n "${PLUTO_LUA_ZIP:-}" ]; then
 fi
 # Multiplayer's private-server link compiles nine interface scripts that only a capture from your own server provides.
 mp_private() { [ "$PRIVATE_SERVER" = 1 ] && [ -n "${PLUTO_LUA_ZIP:-}" ]; }
+[ -n "$MODES" ] || { echo "setup: MODES is empty" >&2; exit 1; }
+for mode in $MODES; do
+  case $mode in sps|mps|zms) ;; *) echo "setup: MODES may only hold sps, mps and zms (got '$mode')" >&2; exit 1;; esac
+done
+exe_of() { case $1 in sps) echo t6sp;; mps) echo t6mp;; zms) echo t6zm;; esac; }
 say() { echo "[$(date +%H:%M:%S)] $*"; }
 die() { echo "setup: $*" >&2; exit 1; }
 
@@ -65,7 +71,8 @@ stage_check() {
   for tool in git python3 xcodegen cmake make; do command -v $tool >/dev/null || die "$tool is not installed"; done
   xcrun --sdk iphoneos --show-sdk-path >/dev/null || die "Xcode with the iPhone SDK is not installed"
   [ -d "$APP/Contents/Resources/toolchain/llvm@17" ] || die "bo2-mac's tools were not found in $APP (set BO2MAC_APP)"
-  for exe in t6sp t6mp t6zm; do
+  for mode in $MODES; do
+    exe=$(exe_of "$mode")
     [ -f "$INPUTS/$exe.exe.unpacked.exe" ] || die "$INPUTS/$exe.exe.unpacked.exe is missing"
   done
   tools=$(cat "$APP/Contents/Resources/version" 2>/dev/null || true)
@@ -146,7 +153,7 @@ stage_convert() {
   if [ -n "$todo" ]; then
     say "converting$todo; progress is in $ROOT/conversion/boot_cache/<mode>/ios-lift.log"
     # shellcheck disable=SC2086
-    python3 -u "$HERE/convert_modes.py" "$ROOT/conversion" "$ROOT/tc" "$INPUTS" --modes $todo --lift-only --jobs 2
+    python3 -u "$HERE/convert_modes.py" "$ROOT/conversion" "$ROOT/tc" "$INPUTS" --modes $todo --built $MODES --lift-only --jobs 2
   fi
   say "convert ready"
 }
@@ -200,7 +207,7 @@ stage_package() {
   [ -z "${RECEIPT:-}" ] || options="$options --receipt $RECEIPT"
   # shellcheck disable=SC2086
   python3 "$HERE/package_game.py" "$ROOT" "${GAME_ZIP:-none}" "$ROOT/out/BlackOpsII.ipa" "$ROOT/package-work" \
-    --bundle-id "$BUNDLE_ID" $options
+    --bundle-id "$BUNDLE_ID" --modes $MODES $options
   say "IPA: $ROOT/out/BlackOpsII.ipa"
 }
 
