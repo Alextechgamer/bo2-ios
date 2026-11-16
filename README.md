@@ -21,8 +21,8 @@ The statically recompiled game from [bo2-mac](https://github.com/adrbn/bo2-mac),
 
 </div>
 
-<p align="center"><img src="docs/assets/multiplayer.jpg" alt="Multiplayer on Aftermath with the HUD and the on-screen controls: move area on the left, FIRE, ADS, JUMP and the other pads on the right" width="640"><br>
-<sub>Multiplayer with the current touch controls. iOS simulator, Aftermath, on a private server.</sub></p>
+<p align="center"><img src="docs/assets/multiplayer.jpg" alt="Multiplayer gameplay recorded on an iPhone, showing the weapon, minimap and rocky outdoor environment" width="800"><br>
+<sub>Multiplayer on an iPhone 17 Pro Max. Frame from the supplied phone recording, at 00:52.5.</sub></p>
 
 > [!IMPORTANT]
 > **This repository contains no game file and no translated game code.** It holds the launcher, the iOS glue and the
@@ -72,7 +72,7 @@ the older submitted-frame counter. They are retained for context, not as the cur
 | Local multiplayer on an iPhone 17 Pro Max | **57–62 fps** (median 62) | one local match on Hijacked, about 26,700 frames; frames the game submitted, read from the app's own log |
 | Online multiplayer on the same phone | **median 32 fps** (27–43 on screen) | one public match on Raid, while screen recording |
 | Zombies on the same phone | **median 32 fps**, dips to 15 | Town from round 20, not recording, phone not hot. Frame rate falls as draw calls rise (about 35 fps at 1,700 draws a frame, 17 at 4,000). Screen recording lowered the same match to a median of 18 |
-| iOS simulator on a Mac | 54–60 fps | the readout in the current screenshots on this page, in a private Zombies and a private Multiplayer match |
+| iOS simulator on a Mac | 54–60 fps | historical readouts in private Zombies and Multiplayer matches; the screenshots below have since been replaced with phone-video frames |
 
 The historical phone figures count frames handed to Metal. The newer results above count newly produced frames
 that Metal reported displaying. Neither repeated presentation of an old frame nor a 120 Hz display target counts
@@ -90,14 +90,14 @@ as a new game frame. There is no newer comparable Zombies match measurement esta
 
 <table>
 <tr>
-<td width="50%"><img src="docs/assets/launcher.jpg" alt="The launcher: Campaign, Multiplayer and Zombies cards, with a Steam chip that reads Signed in" width="100%"><br><sub>The launcher, signed in to Steam.</sub></td>
-<td width="50%"><img src="docs/assets/zombies.jpg" alt="Zombies on TranZit, round 1, with the HUD and touch controls" width="100%"><br><sub>Zombies, TranZit, round 1, on a private server.</sub></td>
-</tr>
-<tr>
-<td width="50%"><img src="docs/assets/multiplayer-online.jpg" alt="A public multiplayer match on Express, on an iPhone, with the touch controls" width="100%"><br><sub>A public match on an iPhone 17 Pro Max, joined with the stock client and the player's own Steam account. Other players' names are blurred. The readout shows 28 fps at this moment; see Results for the whole match.</sub></td>
-<td width="50%" valign="top"><sub>The public-match picture is from the phone; the others are iOS simulator captures. The frame rate and memory readout in the top right corner is the app's own.</sub></td>
+<td width="50%"><img src="docs/assets/launcher.jpg" alt="Phone launcher with Campaign, Multiplayer and Zombies cards, Steam signed in, Game Files and Share FPS log buttons" width="100%"><br><sub>The launcher on the phone, at 00:01 in the supplied recording.</sub></td>
+<td width="50%"><img src="docs/assets/multiplayer-aiming.jpg" alt="Aiming down the weapon sight during Multiplayer gameplay recorded on the phone" width="100%"><br><sub>Multiplayer aiming view, at 02:22.5 in the same recording.</sub></td>
 </tr>
 </table>
+
+These are frames extracted from `bo2-ios-horizontal.mp4`, not simulator screenshots. The video's overlays and
+letterboxing are preserved. Its build is not identified here, so the displayed FPS at each instant should not be
+treated as the latest diagnostic build's average. See [FPS.md](docs/FPS.md) for the measurements from exported logs.
 
 **What you can play**
 
