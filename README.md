@@ -203,6 +203,10 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 - **Steam Cloud saves are not synchronised.**
 - **Online play is unofficial.** The client cannot run Steam's anti-cheat modules. Whether using it puts an account
   at risk is unknown.
+- **Public matches are peer to peer.** As on PC, other players in a match can see your IP address, and the game's
+  2012 network code has publicly reported security holes that were never fixed. iOS confines the app to its own
+  sandbox, and attacks written for the Windows game should not work unchanged on translated code, but neither has
+  been tested. See [before you play online](docs/INSTALL.md#before-you-play-online).
 - **A dropped Steam connection ends online play until the app is reopened.** The session reconnects, but the game's
   sockets do not.
 - **Two save locations.** Local modes and Steam sessions keep saves in different folders.

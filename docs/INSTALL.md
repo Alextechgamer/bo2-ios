@@ -228,3 +228,5 @@ The game starts in **Menu**, where a tap is a mouse click. When a Multiplayer or
 ## Before you play online
 
 This is an unofficial client using your real Steam account on the official servers. It cannot run Steam's anti-cheat modules; if the service asks for one, the app stops the session rather than answering. Whether using it puts an account at risk is unknown. Use it with that in mind.
+
+Public matches are peer to peer, exactly as on PC. Other players in a match can see your IP address; a VPN hides it. The game's network code dates from 2012 and has publicly reported security holes that were never fixed, and this app runs that code unchanged. iOS confines the app to its own sandbox, so a successful attack could reach what the app holds, including your Steam sign-in, but not the rest of the phone. Attacks written for the Windows game should not work unchanged on the translated code. None of this has been tested, so do not treat the app as safe against a hostile player.
