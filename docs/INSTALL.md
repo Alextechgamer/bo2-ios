@@ -84,14 +84,14 @@ The setup prints one line starting with `setup:` that says what went wrong.
 
 ## Without a Mac
 
-**A full build has not been run this way yet.** Only the test mode has: on November 15, 2026 it passed in six minutes on GitHub's Mac (macOS 15.8, Xcode 16.4, 3 cores, 7 GB of memory, 98 GB of disk free after clean-up). That covers the tools download, the source patches and the two libraries. Translating, compiling, linking and packaging the game there are untested, and so is the resulting app. Treat it as experimental.
+**Run once, not yet played.** On November 15, 2026 a full build finished on GitHub's Mac (macOS 26, Xcode 26, 3 cores, 7 GB of memory) in 84 minutes: 39 to translate the three modes, 40 to compile them, and under 3 to link and package. It used about 11 GB of disk. The IPA it produced has the three frameworks, no game files and no account, like one built on a Mac, but it has not been signed, installed or started on a phone yet. Treat this as experimental until it has.
 
 GitHub rents out Apple silicon Macs by the minute for automated builds. The workflow in [.github/workflows/build-ipa.yml](../.github/workflows/build-ipa.yml) runs the quick start's build on one of them and hands you the unsigned IPA, which you then sign and install from Windows or Linux.
 
 Know these three things before you start:
 
 - **It must be a private repository.** In a public repository, and a fork of this one is always public, other people can download what a build produces. That would publish an app containing your game's code. The workflow refuses to build in a public repository.
-- **It is probably not free.** GitHub gives a free personal account about $12 of build time a month for private repositories, and its Macs cost about $0.06 a minute, so roughly three hours. The build may take longer than that on GitHub's three-core Macs; it has not been timed. Past the free amount GitHub stops the build unless you have set a spending limit and a payment method.
+- **One build fits in GitHub's free allowance; several may not.** GitHub gives a free personal account about $12 of build time a month for private repositories, and its Macs cost about $0.06 a minute. The build above took 84 minutes, about $5, so two builds a month are free if you use the allowance for nothing else. Past the free amount GitHub stops the build unless you have set a spending limit and a payment method.
 - **Your three executables go onto GitHub's servers**, in your own private repository. Delete them afterwards.
 
 Steps:
