@@ -84,7 +84,7 @@ The setup prints one line starting with `setup:` that says what went wrong.
 
 ## Without a Mac
 
-**Not yet run.** This workflow has not been run on GitHub, in test mode or in full. Treat it as experimental.
+**A full build has not been run this way yet.** Only the test mode has: on November 15, 2026 it passed in six minutes on GitHub's Mac (macOS 15.8, Xcode 16.4, 3 cores, 7 GB of memory, 98 GB of disk free after clean-up). That covers the tools download, the source patches and the two libraries. Translating, compiling, linking and packaging the game there are untested, and so is the resulting app. Treat it as experimental.
 
 GitHub rents out Apple silicon Macs by the minute for automated builds. The workflow in [.github/workflows/build-ipa.yml](../.github/workflows/build-ipa.yml) runs the quick start's build on one of them and hands you the unsigned IPA, which you then sign and install from Windows or Linux.
 
