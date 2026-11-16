@@ -51,6 +51,8 @@
 !/ios/plutonium_sections.py
 !/ios/runtime.patch
 !/ios/frame-timing.patch
+!/ios/render-pump.patch
+!/ios/frame-prep.patch
 !/ios/controller-friction.patch
 !/ios/setup.sh
 !/ios/runtime_catalog.py

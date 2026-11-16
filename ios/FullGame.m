@@ -365,6 +365,17 @@ static void EndRunLog(void) {
                     frame, rx, ry, ox, oy, friction, lt, lastReady];
             else if (sscanf(line, "[pad-friction] active=%d", &friction) == 1)
                 [report appendFormat:@"controllerAssistActive=%d\n", friction];
+            else if (strncmp(line, "[frame-prep] ", 13) == 0) {
+                double span, draw, record, lock, publish, device;
+                unsigned long long drawCalls, recordCalls;
+                if (sscanf(line, "[frame-prep] %llu %lf %lf %lf %lf %lf %lf %llu %llu",
+                           &frame, &span, &draw, &record, &lock, &publish, &device, &drawCalls, &recordCalls) == 9)
+                    [report appendFormat:@"prepFrame=%llu drawSpanMs=%.3f drawPrepareMs=%.3f drawRecordMs=%.3f drawMutexWaitMs=%.3f publishMutexWaitMs=%.3f deviceMutexWaitMs=%.3f drawCalls=%llu recordCalls=%llu\n",
+                        frame, span, draw, record, lock, publish, device, drawCalls, recordCalls];
+            }
+            else if (sscanf(line, "[render-pump] %llu %lf %lf %lf", &frame, &wait, &total, &encode) == 4)
+                [report appendFormat:@"renderFrame=%llu mainQueueWaitMs=%.3f workerBlockedMs=%.3f metalEncodeMs=%.3f\n",
+                    frame, wait, total, encode];
             else if (sscanf(line, "[frame-submit] %llu %lf %lf %lf", &frame, &wait, &encode, &total) == 4)
                 [report appendFormat:@"submit=%llu pickupWaitMs=%.3f pickupToCommitMs=%.3f readyToCommitMs=%.3f\n",
                     frame, wait, encode, total];

@@ -1,0 +1,92 @@
+--- a/runtime/gfx/metal_backend.mm
++++ b/runtime/gfx/metal_backend.mm
+@@ -2594,3 +2594,17 @@
++// Wall-clock totals; protected by the existing draw-list mutex.
++static double prepLockSeconds = 0, prepRecordSeconds = 0, prepFirstDraw = 0;
++static uint64_t prepDrawCalls = 0;
++struct DrawRecordTiming {
++    double entered;
++    DrawRecordTiming(double requested) : entered(CACurrentMediaTime()) {
++        prepLockSeconds += entered - requested;
++        if (!prepFirstDraw) prepFirstDraw = requested;
++        ++prepDrawCalls;
++    }
++    ~DrawRecordTiming() { prepRecordSeconds += CACurrentMediaTime() - entered; }
++};
++extern "C" void bo2_draw_timing_take(double*, double*, uint64_t*);
+ extern "C" void gfx_real_draw(const GfxDraw* d) {
++    const double requested = CACurrentMediaTime();
+     static bool layout_checked = false;
+     if (__builtin_expect(!layout_checked, 0)) { layout_checked = true; gfx_check_record_layout(); }
+@@ -2603,4 +2617,5 @@
+     if (d->is_copy) {
+         std::lock_guard<std::mutex> lk(g_rd_mu);
++    DrawRecordTiming drawTiming(requested);
+         if (!rd_admit(0)) return;
+         RealDrawRec& c = g_rd.recs.emplace_back();
+@@ -2611,4 +2626,5 @@
+     if (d->is_clear) {
+         std::lock_guard<std::mutex> lk(g_rd_mu);
++    DrawRecordTiming drawTiming(requested);
+         if (!rd_admit(0)) return;
+         RealDrawRec& c = g_rd.recs.emplace_back();
+@@ -2620,4 +2636,5 @@
+     }
+     std::lock_guard<std::mutex> lk0(g_rd_mu);
++    DrawRecordTiming drawTiming(requested);
+     { uint64_t n = (uint64_t)(d->res[0] ? 0u : d->vb_bytes) + d->ib_bytes;   // C50
+       for (int i = 0; i < kMaxCB; i++) n += d->vscb_bytes[i] + d->pscb_bytes[i];
+@@ -2678,5 +2695,7 @@
+ // Called at Present: the frame's draws are complete, publish them.
+ extern "C" void gfx_real_frame_end() {
++    const double publishRequested = CACurrentMediaTime();
+     std::lock_guard<std::mutex> lk(g_rd_mu);
++    const double publishEntered = CACurrentMediaTime();
+     static uint64_t nf = 0, last_dr = 0, last_db = 0;
+     if ((g_rd_drop_recs != last_dr || g_rd_drop_bytes != last_db) && (++nf % 60) == 1) {
+@@ -2726,4 +2745,16 @@
+         double interval = g_ready_time ? (now - g_ready_time) * 1000 : -1;
+         g_ready_time = now;
++        double drawMs = 0, deviceWaitMs = 0;
++        uint64_t drawCalls = 0;
++        bo2_draw_timing_take(&drawMs, &deviceWaitMs, &drawCalls);
++        fprintf(stderr, "[frame-prep] %llu %.3f %.3f %.3f %.3f %.3f %.3f %llu %llu\n",
++                (unsigned long long)g_rd_frame_seq,
++                prepFirstDraw ? (now - prepFirstDraw) * 1000 : 0,
++                drawMs, prepRecordSeconds * 1000, prepLockSeconds * 1000,
++                (publishEntered - publishRequested) * 1000, deviceWaitMs,
++                (unsigned long long)drawCalls, (unsigned long long)prepDrawCalls);
++        prepFirstDraw = prepRecordSeconds = prepLockSeconds = 0;
++        prepDrawCalls = 0;
++
+         fprintf(stderr, "[frame-ready] %llu %.3f\n", (unsigned long long)g_rd_frame_seq, interval);
+     } else {
+--- a/runtime/win32/remaining_dlls_impl.cpp
++++ b/runtime/win32/remaining_dlls_impl.cpp
+@@ -1590,5 +1590,20 @@
+                              idxCount, g_cur_vs, g_cur_ps, g_cur_il, g_ui_vb, g_ui_ib, g_ui_stride, g_cur_rtv);
+ }
++static std::atomic<uint64_t> prepDrawNs{0}, prepDeviceWaitNs{0}, prepDrawCount{0};
++extern "C" void bo2_draw_timing_take(double* draws, double* waits, uint64_t* calls) {
++    *draws = prepDrawNs.exchange(0, std::memory_order_relaxed) / 1000000.;
++    *waits = prepDeviceWaitNs.exchange(0, std::memory_order_relaxed) / 1000000.;
++    *calls = prepDrawCount.exchange(0, std::memory_order_relaxed);
++}
++struct DrawPreparationTiming {
++    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++    ~DrawPreparationTiming() {
++        prepDrawNs.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
++            std::chrono::steady_clock::now() - start).count(), std::memory_order_relaxed);
++        prepDrawCount.fetch_add(1, std::memory_order_relaxed);
++    }
++};
+ static void real_draw(uint32_t idxCount, uint32_t startIdx, int32_t baseVtx) {
++    DrawPreparationTiming timing;
+     if (g_cur_vs && !g_cur_ps && g_cur_dsv_prof && idxCount) {   // D3D11 would still write depth
+         static uint64_t n = 0;
+@@ -3219,4 +3234,5 @@
+         const uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now() - t0).count();
++        prepDeviceWaitNs.fetch_add(us * 1000, std::memory_order_relaxed);
+         g_d3d_wait_us += us;
+         const uint64_t k = ++g_d3d_contended;

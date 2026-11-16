@@ -89,9 +89,17 @@ stage_source() {
     git -C "$ROOT/conversion" apply -p1 "$HERE/frame-timing.patch"
     touch "$ROOT/conversion/.ios-frame-timing"
   fi
+  if [ ! -f "$ROOT/conversion/.ios-render-pump" ]; then
+    git -C "$ROOT/conversion" apply -p1 "$HERE/render-pump.patch"
+    touch "$ROOT/conversion/.ios-render-pump"
+  fi
   if [ ! -f "$ROOT/conversion/.ios-controller-friction" ]; then
     git -C "$ROOT/conversion" apply -p1 "$HERE/controller-friction.patch"
     touch "$ROOT/conversion/.ios-controller-friction"
+  fi
+  if [ ! -f "$ROOT/conversion/.ios-frame-prep" ]; then
+    git -C "$ROOT/conversion" apply -p1 "$HERE/frame-prep.patch"
+    touch "$ROOT/conversion/.ios-frame-prep"
   fi
   say "source ready"
 }

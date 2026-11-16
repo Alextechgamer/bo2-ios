@@ -1,0 +1,201 @@
+--- a/runtime/gfx/metal_backend.mm
++++ b/runtime/gfx/metal_backend.mm
+@@ -3977,10 +3977,38 @@
+ // closes the window, so the caller can stop pumping.
+ static uint64_t g_drawables_nil = 0;   // P774 : nextDrawable sans drawable (fenêtre réduite ?)
++struct PumpTiming {
++    uint64_t frame = 0;
++    double encodeSeconds = 0;
++    bool submitted = false;
++};
++
++static bool pump_on_main(PumpTiming& timing);
++
+ extern "C" bool gfx_pump_once() {
+-    if (!NSThread.isMainThread) {
+-        __block bool result;
+-        dispatch_sync(dispatch_get_main_queue(), ^{ result = gfx_pump_once(); });
++    if (NSThread.isMainThread) {
++        PumpTiming timing;
++        bool result = pump_on_main(timing);
++        if (timing.submitted)
++            fprintf(stderr, "[render-pump] %llu 0 0 %.3f\n",
++                    (unsigned long long)timing.frame, timing.encodeSeconds * 1000);
+         return result;
+     }
++    __block PumpTiming timing;
++    __block double entered;
++    __block bool result;
++    double dispatched = CACurrentMediaTime();
++    dispatch_sync(dispatch_get_main_queue(), ^{
++        entered = CACurrentMediaTime();
++        result = pump_on_main(timing);
++    });
++    double resumed = CACurrentMediaTime();
++    if (timing.submitted)
++        fprintf(stderr, "[render-pump] %llu %.3f %.3f %.3f\n",
++                (unsigned long long)timing.frame, (entered - dispatched) * 1000,
++                (resumed - dispatched) * 1000, timing.encodeSeconds * 1000);
++    return result;
++}
++
++static bool pump_on_main(PumpTiming& timing) {
+     if (!g_open.load()) return false;
+     if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return true;
+@@ -4178,5 +4206,7 @@
+                 ? MTLClearColorMake(1.0, 0.0, 0.0, 1.0)
+                 : MTLClearColorMake(0.05, 0.05, 0.07, 1.0);
++            const double encoderStart = CACurrentMediaTime();
+             [[cb renderCommandEncoderWithDescriptor:c0] endEncoding];
++            timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+         }
+         // --- BO2's own shaders, one Metal render pass per render target -------
+@@ -4466,7 +4496,9 @@
+                         !is_block_compressed(pf)) {
+                         id<MTLCommandBuffer> mb = [g_queue commandBuffer];
++                        const double encoderStart = CACurrentMediaTime();
+                         id<MTLBlitCommandEncoder> mbe = [mb blitCommandEncoder];
+                         [mbe generateMipmapsForTexture:t];
+                         [mbe endEncoding];
++                        timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                         [mb commit];
+                     }
+@@ -4560,7 +4592,9 @@
+                             !is_block_compressed([t pixelFormat])) {
+                             id<MTLCommandBuffer> mb = [g_queue commandBuffer];
++                            const double encoderStart = CACurrentMediaTime();
+                             id<MTLBlitCommandEncoder> mbe = [mb blitCommandEncoder];
+                             [mbe generateMipmapsForTexture:t];
+                             [mbe endEncoding];
++                            timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                             [mb commit];
+                             static uint64_t ngen = 0;
+@@ -4642,7 +4676,9 @@
+                         !is_block_compressed([t pixelFormat])) {
+                         id<MTLCommandBuffer> mb = [g_queue commandBuffer];
++                        const double encoderStart = CACurrentMediaTime();
+                         id<MTLBlitCommandEncoder> mbe = [mb blitCommandEncoder];
+                         [mbe generateMipmapsForTexture:t];
+                         [mbe endEncoding];
++                        timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                         [mb commit];
+                         static uint64_t ngen = 0;
+@@ -4842,5 +4878,7 @@
+                 z.colorAttachments[0].storeAction = MTLStoreActionStore;
+                 z.colorAttachments[0].clearColor  = MTLClearColorMake(0, 0, 0, 0);
++                const double encoderStart = CACurrentMediaTime();
+                 [[cb renderCommandEncoderWithDescriptor:z] endEncoding];
++                timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+             }
+             ring_next();   // P785 : le jeu de tampons que le GPU a fini de lire
+@@ -4938,4 +4976,5 @@
+                         cp.colorAttachments[0].loadAction  = MTLLoadActionDontCare;
+                         cp.colorAttachments[0].storeAction = MTLStoreActionStore;
++                        const double encoderStart = CACurrentMediaTime();
+                         id<MTLRenderCommandEncoder> ce = [cb renderCommandEncoderWithDescriptor:cp];
+                         simd_float4 one = simd_make_float4(1.0f, 1.0f, 0.0f, 0.0f);
+@@ -4956,4 +4995,5 @@
+                         [ce drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                         [ce endEncoding];
++                        timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                         // A COPY FILLS A TARGET JUST AS A DRAW DOES. Counting only
+                         // draws made g_rt_written report "0" for a copy-filled
+@@ -5417,5 +5457,7 @@
+                     rz.depthAttachment.texture = o.tex; rz.depthAttachment.loadAction = MTLLoadActionClear;
+                     rz.depthAttachment.clearDepth = o.efface; rz.depthAttachment.storeAction = MTLStoreActionStore;
++                    const double encoderStart = CACurrentMediaTime();
+                     [[cb renderCommandEncoderWithDescriptor:rz] endEncoding];
++                    timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                     if (o.du_jeu) ++o.n_eff_faits;
+                     o.efface = -1.f; o.du_jeu = false; ++g_dd_n[kDdEffSeul];
+@@ -5424,4 +5466,5 @@
+                 g_coul_attache = sans_couleur ? nil : rp2.colorAttachments[0].texture;
+                 g_coul_niveau = rt_mip;
++                const double encoderStart = CACurrentMediaTime();
+                 id<MTLRenderCommandEncoder> pe2 = [cb renderCommandEncoderWithDescriptor:rp2];
+                 photo_trace_mark(rtv, to_screen, clear_first ? 0xC1EA : 0x10AD, 0);
+@@ -5792,4 +5835,5 @@
+                 }
+                 [pe2 endEncoding];
++                timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                 k = e;
+             }
+@@ -5904,4 +5948,5 @@
+         }
+ 
++        const double encoderStart = CACurrentMediaTime();
+         id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+         // The step-1 debug quad (largest staged texture, aspect-fit) must NOT be
+@@ -5991,4 +6036,5 @@
+         }
+         [enc endEncoding];
++        timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+ 
+         // BO2_UI_SHOWRT=1 — DIAGNOSTIC, off by default. The frontend renders its UI
+@@ -6022,4 +6068,5 @@
+                 dp.colorAttachments[0].clearColor  = MTLClearColorMake(0.02, 0.02, 0.03, 1.0);
+                 dp.colorAttachments[0].storeAction = MTLStoreActionStore;
++                const double encoderStart = CACurrentMediaTime();
+                 id<MTLRenderCommandEncoder> de = [cb renderCommandEncoderWithDescriptor:dp];
+                 [de setRenderPipelineState:g_pipe];
+@@ -6040,4 +6087,5 @@
+                 }
+                 [de endEncoding];
++                timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+             }
+         }
+@@ -6057,4 +6105,5 @@
+                                                           options:MTLResourceStorageModeShared];
+                     if (g_shot_buf) {
++                        const double encoderStart = CACurrentMediaTime();
+                         id<MTLBlitCommandEncoder> sb = [cb blitCommandEncoder];
+                         [sb copyFromTexture:dt sourceSlice:0 sourceLevel:0
+@@ -6065,4 +6114,5 @@
+                        destinationBytesPerImage:need];
+                         [sb endEncoding];
++                        timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                         g_shot_w = (uint32_t)dt.width;
+                         g_shot_h = (uint32_t)dt.height;
+@@ -6209,4 +6259,5 @@
+                                                      options:MTLResourceStorageModeShared];
+                 if (g_rt_buf) {
++                    const double encoderStart = CACurrentMediaTime();
+                     id<MTLBlitCommandEncoder> rb = [cb blitCommandEncoder];
+                     for (auto& kv : want) {
+@@ -6221,4 +6272,5 @@
+                     }
+                     [rb endEncoding];
++                    timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                     rt_shots = want;
+                 }
+@@ -6231,4 +6283,5 @@
+                                                    options:MTLResourceStorageModeShared];
+                 if (s_dbuf) {
++                    const double encoderStart = CACurrentMediaTime();
+                     id<MTLBlitCommandEncoder> db = [cb blitCommandEncoder];
+                     for (auto& kv : depth_want) {
+@@ -6243,4 +6296,5 @@
+                     }
+                     [db endEncoding];
++                    timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+                     g_depth_shots = depth_want;
+                     g_depth_buf = s_dbuf;
+@@ -6257,4 +6311,5 @@
+             id<MTLTexture> dt = [drawable texture];
+             if (g_pix_buf && dt.width > 4 && dt.height > 4) {
++                const double encoderStart = CACurrentMediaTime();
+                 id<MTLBlitCommandEncoder> be = [cb blitCommandEncoder];
+                 [be copyFromTexture:dt sourceSlice:0 sourceLevel:0
+@@ -6345,4 +6400,5 @@
+                 g_probe_rt_n = slotn;
+                 [be endEncoding];
++                timing.encodeSeconds += CACurrentMediaTime() - encoderStart;
+             }
+         }
+@@ -6382,4 +6438,6 @@
+         double commitStart = timed_seq ? CACurrentMediaTime() : 0;
+         [cb commit];
++        timing.frame = timed_seq;
++        timing.submitted = true;
+         if (timed_seq) {
+             fprintf(stderr, "[frame-submit] %llu %.3f %.3f %.3f\n",

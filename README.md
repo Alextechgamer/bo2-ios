@@ -17,7 +17,7 @@ The statically recompiled game from [bo2-mac](https://github.com/adrbn/bo2-mac),
 ![status: experimental](https://img.shields.io/badge/status-experimental-f4f1ea?style=flat-square&labelColor=0b0b0c)
 
 <sub>[Abstract](#abstract) · [Controls](#controls) · [Repository](#repository) · [Legal](#legal)</sub><br>
-<sub>Experimental, 2026-11-10 · tried on one iPhone 17 Pro Max and the iOS 26 simulator</sub>
+<sub>Experimental, updated 2026-11-15 · tried on one iPhone 17 Pro Max and the iOS 26 simulator</sub>
 
 </div>
 
@@ -51,6 +51,22 @@ ARM64 code.
 
 Everything below was observed once or a few times on the hardware named.
 
+**Latest phone measurements (November 15):** the newest diagnostic run averaged **55.5 fresh displayed FPS** over
+7 minutes 12 seconds, with a highest two-second sample of **93.3 FPS**. An earlier capture averaged **68.8 FPS**;
+the highest two-second sample across the recorded runs was **119.5 FPS**. These captures include menus, loading
+and gameplay, with different scenes and diagnostic overhead. They are not controlled before/after comparisons,
+and the peaks do not mean sustained 120 FPS. See [the full FPS measurements and timings](docs/FPS.md).
+
+| Recent build | Average fresh displayed FPS | Highest two-second sample | Capture duration |
+|---|---:|---:|---:|
+| 2611142101 | 68.8 | 118.5 | 449.405 s |
+| 2611142201 (Multiplayer) | 68.4 | 119.5 | 206.717 s |
+| 2611151401 | 57.4 | 94.6 | 257.011 s |
+| 2611151601 (latest diagnostic) | 55.5 | 93.3 | 431.604 s |
+
+**Historical scene-specific results:** the figures below predate the fresh-displayed-frame diagnostics and use
+the older submitted-frame counter. They are retained for context, not as the current performance headline.
+
 | | measured | conditions |
 |---|---|---|
 | Local multiplayer on an iPhone 17 Pro Max | **57–62 fps** (median 62) | one local match on Hijacked, about 26,700 frames; frames the game submitted, read from the app's own log |
@@ -58,7 +74,9 @@ Everything below was observed once or a few times on the hardware named.
 | Zombies on the same phone | **median 32 fps**, dips to 15 | Town from round 20, not recording, phone not hot. Frame rate falls as draw calls rise (about 35 fps at 1,700 draws a frame, 17 at 4,000). Screen recording lowered the same match to a median of 18 |
 | iOS simulator on a Mac | 54–60 fps | the readout in the current screenshots on this page, in a private Zombies and a private Multiplayer match |
 
-The phone figure counts frames the game hands to Metal. Frames actually shown on screen have not been measured yet.
+The historical phone figures count frames handed to Metal. The newer results above count newly produced frames
+that Metal reported displaying. Neither repeated presentation of an old frame nor a 120 Hz display target counts
+as a new game frame. There is no newer comparable Zombies match measurement establishing an FPS improvement.
 
 | | observed | where |
 |---|---|---|
@@ -68,7 +86,7 @@ The phone figure counts frames the game hands to Metal. Frames actually shown on
 | Private Zombies | TranZit on a LAN-mode server: active play with advancing snapshots | simulator, and iPhone over USB |
 | Sound and player name | game audio plays; the in-game name is the Steam display name | iPhone |
 | Touch controls | move stick, swipe look, pad buttons | iPhone, multiplayer only so far |
-| Game files in this repository | none: 60-odd source and text files, the largest under 50 KB, in the tree and in its history | checked with the scan in [Legal](#legal) |
+| Game files in this repository | source, documentation and screenshots only; no IPA downloads | each player builds from their own Steam copy |
 
 <table>
 <tr>
@@ -163,8 +181,8 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 - **You build the translated frameworks yourself.** [ios/setup.sh](ios/setup.sh) runs bo2-mac's converter for iOS
   on your own executables. Multiplayer's private-server link needs nine interface scripts captured from your own
   r5369 server; the capture tool is not in this repository yet.
-- **Downloading the game from Steam inside the app is not implemented.** Game files come from the package or from
-  the private library installer. The Steam library screen lists what you own and what is playable.
+- **The in-app Steam downloader is experimental.** It is available through **Game Files**; end-to-end reliability
+  still needs testing. See [the installation notes](docs/INSTALL.md).
 - **Steam Cloud saves are not synchronised.**
 - **Online play is unofficial.** The client cannot run Steam's anti-cheat modules. Whether using it puts an account
   at risk is unknown.
@@ -173,7 +191,7 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 - **Two save locations.** Local modes and Steam sessions keep saves in different folders.
 - **Private servers over Wi-Fi timed out on the tested phone.** The USB path through a Mac works.
 - **Local play is being worked on.** Campaign, local Multiplayer and solo Zombies start, but have had far less
-  attention than online play. Coming soon.
+  attention than online play. Zombies Town loading freezes have been reported and are not confirmed fixed.
 - **Not yet tried:** Campaign and Zombies with the new touch controls, Zombies online with Steam (the launcher
   offers it; no session has been played), progress after a finished
   public match, any iPhone other than the one named above.
@@ -192,6 +210,8 @@ Hosting and joining private servers, the Mac relay, the USB fallback and the mat
 | [ios/SteamRuntimeProvider.mm](ios/SteamRuntimeProvider.mm) | The provider table the game's Steam interface reads |
 | [ios/setup.sh](ios/setup.sh) | The build from a Steam copy to an IPA, in resumable stages |
 | [ios/runtime.patch](ios/runtime.patch) | The iOS changes to bo2-mac's runtime, against v0.2.0-test.4 |
+| [docs/FPS.md](docs/FPS.md) | Phone FPS captures, timing definitions and simulator profiling findings |
+| [ios/frame-prep.patch](ios/frame-prep.patch), [ios/render-pump.patch](ios/render-pump.patch) | Frame-production, synchronization and Metal-encoding diagnostics |
 | [ios/convert_modes.py](ios/convert_modes.py), [ios/link_mode.py](ios/link_mode.py) | Translate the three executables; link one framework per mode, with the network transports |
 | [ios/dw_online.cpp](ios/dw_online.cpp), [ios/dw_online.h](ios/dw_online.h), [ios/dw_guest_socket.h](ios/dw_guest_socket.h) | The game's Winsock calls on real sockets, allowed only for a signed-in account that owns the game |
 | [ios/plutonium_sections.py](ios/plutonium_sections.py) | The memory image a mode starts from when it joins a LAN-mode server |
