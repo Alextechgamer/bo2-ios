@@ -12,8 +12,18 @@ import UIKit
 @MainActor
 @objc(BO2GameDownload)
 final class BO2GameDownload: NSObject {
-    private static let apps: [(id: UInt32, name: String)] =
-        [(202970, "Campaign"), (202990, "Multiplayer"), (212910, "Zombies")]
+    /// The games whose mode this app was built with. An app built from fewer
+    /// executables does not fetch the files of the modes it cannot run.
+    private static let apps: [(id: UInt32, name: String)] = {
+        let all: [(id: UInt32, name: String, mode: String)] =
+            [(202970, "Campaign", "sps"), (202990, "Multiplayer", "mps"), (212910, "Zombies", "zms")]
+        let built = all.filter { app in
+            guard let root = Bundle.main.resourceURL else { return false }
+            return FileManager.default.fileExists(
+                atPath: root.appendingPathComponent("Modes/\(app.mode)/pe_sections.bin").path)
+        }
+        return (built.isEmpty ? all : built).map { (id: $0.id, name: $0.name) }
+    }()
     private static var task: Task<Void, Never>?
 
     @objc(isRunning) static var isRunning: Bool { task != nil }

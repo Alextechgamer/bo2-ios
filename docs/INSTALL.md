@@ -30,7 +30,7 @@ ls "/Applications/Black Ops II.app/Contents/Resources/toolchain/llvm@17"
 
 These are not the files in your Steam folder. Steam wraps `t6sp.exe`, `t6mp.exe` and `t6zm.exe` in its copy protection, and the build refuses them as they are. It needs unpacked copies made from your own install. Each mode has its own executable, and Steam installs each mode separately from your library.
 
-**Only want some modes?** Supply only their executables and put `MODES` in front of the commands in steps 5 and 6. `MODES="mps zms"` builds an app with Multiplayer and Zombies only; `sps` is Campaign. The build is shorter and the app shows only those modes. A Multiplayer-and-Zombies build made this way on a Mac took 47 minutes and produced an app holding just those two; that app has not been run on a phone yet, and the GitHub workflow has not been run with fewer than three executables.
+**Only want some modes?** Supply only their executables and put `MODES` in front of the commands in steps 5 and 6. `MODES="mps zms"` builds an app with Multiplayer and Zombies only; `sps` is Campaign. The build is shorter, and the app shows only those modes and downloads only their game files. A Multiplayer-and-Zombies build made this way on a Mac took 47 minutes and produced an app holding just those two; that app has not been run on the test phone, and the GitHub workflow has not been run with fewer than three executables.
 
 [bo2-mac's README](https://github.com/adrbn/bo2-mac#install) says what they are. Neither project provides a tool to make them. Each file is checked by SHA-256, so a wrong file is refused straight away. Never share them.
 
