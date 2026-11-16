@@ -28,7 +28,8 @@ env:
 
 jobs:
   build:
-    runs-on: macos-15
+    # macOS 26 carries Xcode 26, which this build was made with. Xcode 16 (on macos-15) fails in the translation stage.
+    runs-on: macos-26
     timeout-minutes: 355
     steps:
       - name: Refuse to build game code in a public repository
