@@ -159,6 +159,8 @@ the phone. A hardware controller works at the same time.
 **Start with the [quick start in docs/INSTALL.md](docs/INSTALL.md#quick-start)**: eight numbered steps from an empty
 Mac to the game on your phone, with what to do when a step fails.
 
+**No Mac?** The same build runs on GitHub's Macs from a private copy of this repository: see [Without a Mac](docs/INSTALL.md#without-a-mac). One build took 84 minutes there, inside GitHub's free monthly allowance, and its app played a public match on the test phone.
+
 You need an Apple silicon Mac with Xcode, a Steam account that owns the game, [bo2-mac](https://github.com/adrbn/bo2-mac)'s
 app (`v0.2.0-test.4`) and your three unpacked executables in `~/.bo2-native/steam/`. Then:
 
@@ -247,7 +249,7 @@ libraries, compiled frameworks, archives and device reports outside the reposito
 3. Keep online play alive across a brief Steam reconnect.
 4. Enforce the runtime compatibility check on every way into a Steam session.
 5. Private-server joins over Wi-Fi and by host name.
-6. A full run of `ios/setup.sh` on a second Mac, and a match played with what it builds.
+6. A full run of `ios/setup.sh` on a second Mac. Done once on GitHub's Mac on November 15, with a public match played from what it built; a run by someone else is still wanted.
 
 ## Legal
 

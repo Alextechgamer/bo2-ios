@@ -4,6 +4,8 @@ This guide is for someone setting the port up on their own iPhone. It covers wha
 
 ## Quick start
 
+No Mac? Skip to [Without a Mac](#without-a-mac): GitHub's Macs can run this build for you.
+
 This is the shortest path: an app without the game files inside, which downloads them from Steam on the phone. Every command is run in Terminal on the Mac. The sections after this one explain each part and the other options.
 
 **1. Install the build tools.** Install Xcode from the App Store and open it once so it installs the iPhone platform. Install [Homebrew](https://brew.sh), then:
@@ -84,7 +86,7 @@ The setup prints one line starting with `setup:` that says what went wrong.
 
 ## Without a Mac
 
-**Run once, not yet played.** On November 15, 2026 a full build finished on GitHub's Mac (macOS 26, Xcode 26, 3 cores, 7 GB of memory) in 84 minutes: 39 to translate the three modes, 40 to compile them, and under 3 to link and package. It used about 11 GB of disk. The IPA it produced has the three frameworks, no game files and no account, like one built on a Mac, but it has not been signed, installed or started on a phone yet. Treat this as experimental until it has.
+**Run once, and played.** On November 15, 2026 a full build finished on GitHub's Mac (macOS 26, Xcode 26, 3 cores, 7 GB of memory) in 84 minutes: 39 to translate the three modes, 40 to compile them, and under 3 to link and package. It used about 11 GB of disk. The IPA was signed with a signing service and installed on the test phone over an existing copy; **Game Files** checked the installed files and a public Multiplayer match was played (owner's report). Campaign and Zombies from this build have not been reported on. One run on one account is the whole record so far.
 
 GitHub rents out Apple silicon Macs by the minute for automated builds. The workflow in [.github/workflows/build-ipa.yml](../.github/workflows/build-ipa.yml) runs the quick start's build on one of them and hands you the unsigned IPA, which you then sign and install from Windows or Linux.
 
