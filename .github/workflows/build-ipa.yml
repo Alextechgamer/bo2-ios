@@ -1,11 +1,8 @@
-# Builds your own unsigned IPA on GitHub's Apple silicon Macs, for people without a Mac.
+# Builds your own unsigned IPA on one of GitHub's Apple silicon Macs, for people without a Mac.
 # Read docs/INSTALL.md, "Without a Mac", before using it. In short:
 #   - Run it only in a PRIVATE copy of this repository. In a public one, anyone could download the result.
 #   - Put your three unpacked executables on a release tagged "inputs" in that private copy.
 #   - Private repositories pay for macOS minutes beyond a small free amount.
-#
-# Campaign, Multiplayer and Zombies are built at the same time on three machines, then packaged on a fourth.
-# Each mode's result is saved, so a later run rebuilds a mode only when its inputs changed.
 name: Build IPA
 
 on:
@@ -28,25 +25,12 @@ env:
   TOOLS: /Users/runner/bo2-mac-tools
   BO2MAC_ZIP: https://github.com/adrbn/bo2-mac/releases/download/v0.2.0-test.4/bo2-mac.zip
   BO2MAC_SHA256: 53c58797e61d2ed834d8642cd880c8114c384bbb3da7a55c3ac43c5885d4a584
-  BO2MAC_APP: /Users/runner/bo2-mac-tools/Black Ops II.app
-  # The runner's disk is checked by the workflow itself; the setup's own 30 GB rule is for a Mac you keep.
-  MIN_FREE_GB: 8
 
 jobs:
-  mode:
-    name: Build ${{ matrix.mode }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { mode: sps, exe: t6sp }
-          - { mode: mps, exe: t6mp }
-          - { mode: zms, exe: t6zm }
+  build:
     # macOS 26 carries Xcode 26, which this build was made with. Xcode 16 (on macos-15) fails in the translation stage.
     runs-on: macos-26
     timeout-minutes: 355
-    env:
-      MODES: ${{ matrix.mode }}
     steps:
       - name: Refuse to build game code in a public repository
         if: ${{ !inputs.preflight && !github.event.repository.private }}
@@ -65,37 +49,7 @@ jobs:
           xcodebuild -version
           df -g /Users/runner
 
-      - name: Fetch your executable from the "inputs" release
-        id: inputs
-        if: ${{ !inputs.preflight }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p "$HOME/.bo2-native/steam"
-          # The setup's check wants all three files, so all three are fetched; only this mode's is translated here.
-          gh release download inputs --repo "$GITHUB_REPOSITORY" --dir "$HOME/.bo2-native/steam" --pattern '*.unpacked.exe' || {
-            echo "::error::No release tagged 'inputs' with your three .unpacked.exe files was found in this repository."
-            exit 1
-          }
-          for exe in t6sp t6mp t6zm; do
-            [ -f "$HOME/.bo2-native/steam/$exe.exe.unpacked.exe" ] || { echo "::error::$exe.exe.unpacked.exe is missing from the 'inputs' release."; exit 1; }
-          done
-          echo "sha=$(shasum -a 256 "$HOME/.bo2-native/steam/${{ matrix.exe }}.exe.unpacked.exe" | cut -c1-20)" >> "$GITHUB_OUTPUT"
-
-      - name: Look for this mode's saved result
-        id: saved
-        if: ${{ !inputs.preflight }}
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ${{ env.WORK }}/device/${{ matrix.mode }}
-            ${{ env.WORK }}/conversion/boot_cache/${{ matrix.mode }}/pe_sections.bin
-          # Everything a mode's framework is made from: the executable, bo2-mac's tools, and the sources below.
-          # The launcher's own files are not here, so a launcher change reuses the saved result.
-          key: bo2-${{ matrix.mode }}-${{ steps.inputs.outputs.sha }}-${{ env.BO2MAC_SHA256 }}-${{ hashFiles('ios/*.patch', 'ios/setup.sh', 'ios/fold_modes.sh', 'ios/convert_modes.py', 'ios/link_mode.py', 'ios/plutonium_sections.py', 'ios/assemble_full.py', 'ios/*.cpp', 'ios/*.mm', 'ios/dw_*.h', 'ios/SteamGuestCallbacks.h', 'ios/SteamRuntimeCalls.h', 'ios/SteamRuntimeProvider.h', '.github/workflows/build-ipa.yml') }}
-
       - name: Free disk space
-        if: ${{ steps.saved.outputs.cache-hit != 'true' }}
         run: |
           # Other Xcode versions, simulators and the Android tools are not used by this build.
           current=$(cd "$(xcode-select -p)/../.." && pwd -P)
@@ -108,24 +62,40 @@ jobs:
           df -g /Users/runner
 
       - name: Install build tools
-        if: ${{ steps.saved.outputs.cache-hit != 'true' }}
         run: brew install xcodegen cmake
 
       - name: Fetch bo2-mac's translation tools
-        if: ${{ steps.saved.outputs.cache-hit != 'true' }}
         run: |
           curl -sSL --fail -o "$RUNNER_TEMP/bo2-mac.zip" "$BO2MAC_ZIP"
           echo "$BO2MAC_SHA256  $RUNNER_TEMP/bo2-mac.zip" | shasum -a 256 -c -
           mkdir -p "$TOOLS"
           ditto -x -k "$RUNNER_TEMP/bo2-mac.zip" "$TOOLS"
           rm "$RUNNER_TEMP/bo2-mac.zip"
-          cat "$BO2MAC_APP/Contents/Resources/version"
-          "$BO2MAC_APP/Contents/Resources/toolchain/llvm@17/bin/clang" --version
+          cat "$TOOLS/Black Ops II.app/Contents/Resources/version"
+          "$TOOLS/Black Ops II.app/Contents/Resources/toolchain/llvm@17/bin/clang" --version
+
+      - name: Fetch your executables from the "inputs" release
+        if: ${{ !inputs.preflight }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$HOME/.bo2-native/steam"
+          gh release download inputs --repo "$GITHUB_REPOSITORY" --dir "$HOME/.bo2-native/steam" --pattern '*.unpacked.exe' || {
+            echo "::error::No release tagged 'inputs' with your three .unpacked.exe files was found in this repository."
+            exit 1
+          }
+          for exe in t6sp t6mp t6zm; do
+            [ -f "$HOME/.bo2-native/steam/$exe.exe.unpacked.exe" ] || { echo "::error::$exe.exe.unpacked.exe is missing from the 'inputs' release."; exit 1; }
+          done
 
       - name: Build
-        if: ${{ steps.saved.outputs.cache-hit != 'true' }}
+        env:
+          BO2MAC_APP: /Users/runner/bo2-mac-tools/Black Ops II.app
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+          # The runner's disk is smaller than the 30 GB the setup asks for on a Mac; the free space is printed after each stage.
+          MIN_FREE_GB: 8
         run: |
-          if [ "${{ inputs.preflight }}" = true ]; then stages="source deps"; else stages="check source deps convert fold link"; fi
+          if [ "${{ inputs.preflight }}" = true ]; then stages="source deps"; else stages="check source deps convert fold link package"; fi
           for stage in $stages; do
             echo "::group::$stage"
             ios/setup.sh "$WORK" "$stage"
@@ -133,69 +103,8 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Save this mode's result for later runs
-        if: ${{ !inputs.preflight && steps.saved.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ${{ env.WORK }}/device/${{ matrix.mode }}
-            ${{ env.WORK }}/conversion/boot_cache/${{ matrix.mode }}/pe_sections.bin
-          key: ${{ steps.saved.outputs.cache-primary-key }}
-
-      - name: Pack this mode for the packaging job
-        if: ${{ !inputs.preflight }}
-        run: tar -C "$WORK" -cf "$RUNNER_TEMP/mode-${{ matrix.mode }}.tar" "device/${{ matrix.mode }}" "conversion/boot_cache/${{ matrix.mode }}/pe_sections.bin"
-
-      - name: Hand this mode to the packaging job
-        if: ${{ !inputs.preflight }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: mode-${{ matrix.mode }}
-          path: ${{ runner.temp }}/mode-${{ matrix.mode }}.tar
-          retention-days: 1
-          compression-level: 1
-          if-no-files-found: error
-
-      - name: Upload the build logs after a failure
-        if: ${{ failure() && !inputs.preflight }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs-${{ matrix.mode }}
-          retention-days: 1
-          path: |
-            ${{ env.WORK }}/link-*.log
-            ${{ env.WORK }}/deps/**/*.log
-            ${{ env.WORK }}/conversion/boot_cache/*/ios-lift.log
-            ${{ env.WORK }}/conversion/boot_cache/*/*.FAILED
-
-  package:
-    name: Package the IPA
-    needs: mode
-    if: ${{ !inputs.preflight }}
-    runs-on: macos-26
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build tools
-        run: brew install xcodegen
-
-      - name: Collect the three modes
-        uses: actions/download-artifact@v4
-        with:
-          pattern: mode-*
-          merge-multiple: true
-          path: ${{ runner.temp }}/modes
-
-      - name: Package
-        env:
-          BUNDLE_ID: ${{ inputs.bundle_id }}
-        run: |
-          mkdir -p "$WORK"
-          for mode in sps mps zms; do tar -C "$WORK" -xf "$RUNNER_TEMP/modes/mode-$mode.tar"; done
-          ios/setup.sh "$WORK" package
-
       - name: Upload the unsigned IPA
+        if: ${{ !inputs.preflight }}
         uses: actions/upload-artifact@v4
         with:
           name: BlackOpsII-unsigned
@@ -203,3 +112,15 @@ jobs:
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
+
+      - name: Upload the build logs after a failure
+        if: ${{ failure() && !inputs.preflight }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          retention-days: 1
+          path: |
+            ${{ env.WORK }}/link-*.log
+            ${{ env.WORK }}/deps/**/*.log
+            ${{ env.WORK }}/conversion/boot_cache/*/ios-lift.log
+            ${{ env.WORK }}/conversion/boot_cache/*/*.FAILED
