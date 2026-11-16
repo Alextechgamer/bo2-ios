@@ -167,11 +167,11 @@ brew install xcodegen cmake python@3.12
 ```
 
 ```sh
-git clone https://github.com/Alextechgamer/bo2-ios-source.git
+git clone https://github.com/Alextechgamer/bo2-ios.git
 ```
 
 ```sh
-cd bo2-ios-source
+cd bo2-ios
 ```
 
 ```sh

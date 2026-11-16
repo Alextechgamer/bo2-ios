@@ -31,11 +31,11 @@ ls "/Applications/Black Ops II.app/Contents/Resources/toolchain/llvm@17"
 **4. Get this repository.**
 
 ```sh
-git clone https://github.com/Alextechgamer/bo2-ios-source.git
+git clone https://github.com/Alextechgamer/bo2-ios.git
 ```
 
 ```sh
-cd bo2-ios-source
+cd bo2-ios
 ```
 
 **5. Check that everything is in place.** `~/bo2-ios-build` is the folder the build works in; any folder on a disk with 30 GB free will do. The check takes a few seconds and names the first thing that is missing.
