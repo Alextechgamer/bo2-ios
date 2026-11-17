@@ -30,6 +30,12 @@ The statically recompiled game from [bo2-mac](https://github.com/adrbn/bo2-mac),
 > player builds their own from their own Steam copy, and it may not be shared. Unofficial fan project, not affiliated
 > with Activision, Treyarch, Valve or Apple. To play, buy the game.
 
+> [!TIP]
+> **Not technical? An AI assistant can do the build for you.** Give ChatGPT or Claude a link to this repository and
+> ask it to follow [Without a Mac](docs/INSTALL.md#without-a-mac): it can set up the private copy on GitHub and run the
+> build there. You supply your own unpacked game executables. Signing the app, installing it on your phone and signing
+> in to Steam are still yours to do.
+
 ---
 
 ## Abstract
